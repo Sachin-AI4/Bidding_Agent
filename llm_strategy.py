@@ -1,0 +1,274 @@
+"""
+Layer 2: LLM-Based Strategy Reasoning
+Uses Claude/GPT to make intelligent bidding strategy decisions.
+"""
+import json
+import os
+from typing import Dict, Any, Optional
+from models import AuctionContext, StrategyDecision
+
+
+class LLMStrategySelector:
+    """
+    LLM-based strategy selection using structured prompts.
+    Handles platform-specific rules and bidder analysis.
+    """
+
+    def __init__(self, provider: str = "openrouter", model: str = "google/gemini-2.5-flash-preview-09-2025"):
+        self.provider = provider
+        self.model = model
+        self.client = self._initialize_client()
+
+    def _initialize_client(self):
+        """Initialize the LLM client based on provider."""
+        if self.provider == "anthropic":
+            try:
+                from anthropic import Anthropic
+                api_key = os.getenv("ANTHROPIC_API_KEY")
+                if not api_key:
+                    raise ValueError("ANTHROPIC_API_KEY environment variable required")
+                return Anthropic(api_key=api_key)
+            except ImportError:
+                raise ImportError("anthropic package required for Anthropic models")
+        elif self.provider in ["openai", "openrouter"]:
+            try:
+                from openai import OpenAI
+                self._load_env_file()
+                api_key = os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY")
+                if not api_key:
+                    raise ValueError(" OPENROUTER_API_KEY or OPENAI_API_KEY environment variable required")
+
+                base_url = None
+                if self.provider =="openrouter":
+                    base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+
+                return OpenAI(api_key=api_key, base_url=base_url)
+            except ImportError:
+                raise ImportError("openai package required for OpenAI models")
+        else:
+            raise ValueError(f"Unsupported provider: {self.provider}")
+
+
+    def _load_env_file(self):
+        """ Load environment variables from .env file """
+        from pathlib import Path
+        env_path = Path(".env")
+        if env_path.exists():
+            try:
+                with env_path.open("r", encoding="utf-8") as env_file:
+                    for raw_line in env_file:
+                        line = raw_line.strip()
+                        if not line or line.startswith("#"):
+                            continue
+
+                        if "=" not in line:
+                            continue
+
+                        key, value = line.split("=", 1)
+                        os.environ.setdefault(key.strip(), value.strip())
+            except UnicodeDecodeError:
+                print("DEBUG: .env file has encoding issues, skipping .env loading")
+            except Exception as e:
+                print(f"DEBUG: Error loading .env file: {e}, skipping .env loading")        
+
+    def _get_system_prompt(self) -> str:
+        """Get the system prompt that defines the AI's role and reasoning framework."""
+        return """# Domain Auction Strategy AI
+
+You are an expert domain auction strategist with deep knowledge of:
+- Proxy bidding mechanics across GoDaddy, NameJet, and Dynadot
+- Platform-specific rules (GoDaddy's 5-minute extension, minimum increments)
+- Bidder psychology and bot detection patterns
+- Profit margin optimization and risk management
+
+## Core Principles
+
+1. **Profit First**: Target 60-70% of estimated value for 30%+ profit margins
+2. **Safety Ceiling**: Never recommend bids above 80% of estimated value
+3. **Platform Awareness**: Respect 5-minute extensions and auto-bidding rules
+4. **Opponent Analysis**: Adjust strategy based on bot vs human behavior
+
+## Strategy Options
+
+- `proxy_max`: Set maximum proxy bid, let platform auto-bid incrementally
+- `last_minute_snipe`: Time bid for final moments to avoid counters
+- `incremental_test`: Small bids to test competition without commitment
+- `wait_for_closeout`: Wait for auction to end with minimal bids
+- `aggressive_early`: Rare, only for must-have domains
+- `do_not_bid`: Walk away when profit impossible
+
+## Platform Rules
+
+**GoDaddy**: 5-minute extension on late bids, $5 minimum increment
+**NameJet**: No extensions, $5 increment, fast-paced
+**Dynadot**: Variable increments, occasional extensions
+
+## Decision Framework
+
+1. **Value Tier Analysis**:
+   - High ($1000+): Conservative, avoid escalation
+   - Medium ($100-1000): Balanced approach
+   - Low (<$100): Aggressive or wait for closeout
+
+2. **Competition Assessment**:
+   - 0 bidders: Wait for closeout or proxy max early
+   - 1-2 bidders: Proxy max with safe limits
+   - 3+ bidders: Consider sniping or incremental testing
+
+3. **Bot Detection Response**:
+   - Bots: Prefer sniping to minimize reaction window
+   - Humans: More flexible, can use proxy strategies
+
+4. **Time Pressure**:
+   - >1 hour: Strategic positioning
+   - <1 hour: Execute final strategy
+   - <5 minutes: Sniping mode (GoDaddy extension aware)"""
+
+    def _get_user_prompt(self, context: AuctionContext) -> str:
+        """Generate the user prompt with auction context."""
+
+        # Calculate safe financial boundaries
+        safe_max = context.estimated_value * 0.70
+        hard_ceiling = context.estimated_value * 0.80
+
+        # Determine value tier
+        if context.estimated_value >= 1000:
+            value_tier = "HIGH"
+            tier_note = "Conservative approach, avoid emotional escalation"
+        elif context.estimated_value >= 100:
+            value_tier = "MEDIUM"
+            tier_note = "Balanced strategy, test competition"
+        else:
+            value_tier = "LOW"
+            tier_note = "Aggressive or wait for closeout"
+
+        # Platform-specific notes
+        platform_rules = {
+            "godaddy": "5-minute extension on late bids. Snipe timing must account for auto-extensions.",
+            "namejet": "No extensions, fast-paced. Immediate execution required.",
+            "dynadot": "Variable increments, occasional extensions. Monitor closely."
+        }
+
+        prompt = f"""## Auction Context
+
+**Domain**: {context.domain}
+**Platform**: {context.platform.upper()}
+**Platform Rules**: {platform_rules.get(context.platform, "Standard proxy bidding rules")}
+
+**Financials**:
+- Estimated Value: ${context.estimated_value:.2f}
+- Current Bid: ${context.current_bid:.2f}
+- Your Current Proxy: ${context.your_current_proxy:.2f} (0 = none)
+- Budget Available: ${context.budget_available:.2f}
+- Safe Max (70% of value): ${safe_max:.2f}
+- Hard Ceiling (80% of value): ${hard_ceiling:.2f}
+
+**Competition**:
+- Active Bidders: {context.num_bidders}
+- Hours Remaining: {context.hours_remaining:.1f}
+
+**Bidder Analysis**:
+- Bot Detected: {context.bidder_analysis['bot_detected']}
+- Corporate Buyer: {context.bidder_analysis['corporate_buyer']}
+- Aggression Score: {context.bidder_analysis['aggression_score']}/10
+- Avg Reaction Time: {context.bidder_analysis['reaction_time_avg']:.1f}s
+
+**Value Tier**: {value_tier} - {tier_note}
+
+## Task
+
+Analyze this auction and recommend the optimal bidding strategy. Consider:
+
+1. **Profit Potential**: Can we achieve 30%+ margin within safe limits?
+2. **Competition**: How many bidders and their behavior patterns?
+3. **Platform Mechanics**: How do {context.platform} rules affect timing?
+4. **Risk Assessment**: What's the likelihood of overpaying?
+5. **Timing**: When should we act given remaining time?
+
+## Required Output Format
+
+Respond with ONLY a valid JSON object matching this schema:
+
+```json
+{{
+  "strategy": "proxy_max|last_minute_snipe|incremental_test|wait_for_closeout|aggressive_early|do_not_bid",
+  "recommended_bid_amount": <float>,
+  "confidence": <0.0-1.0>,
+  "risk_level": "low|medium|high",
+  "reasoning": "<detailed explanation with strategy rationale and profit calculations>"
+}}
+```
+
+**Important**:
+- recommended_bid_amount = your proxy maximum (what you set, not next visible bid)
+- confidence = certainty in your strategy (0.0-1.0)
+- reasoning = minimum 100 characters explaining your logic
+- Stay within safe financial boundaries"""
+
+        return prompt
+
+    def get_strategy_decision(self, context: AuctionContext) -> Optional[StrategyDecision]:
+        """
+        Get strategy decision from LLM.
+        Returns StrategyDecision object or None if LLM call fails.
+        """
+        try:
+            system_prompt = self._get_system_prompt()
+            user_prompt = self._get_user_prompt(context)
+
+            # Initialize content to avoid scope errors
+            content = None
+
+            if self.provider == "anthropic":
+                print("DEBUG: Using Anthropic API")
+                response = self.client.messages.create(
+                    model=self.model,
+                    max_tokens=2000,
+                    temperature=0.1,  # Low temperature for consistent strategy
+                    system=system_prompt,
+                    messages=[
+                        {"role": "user", "content": user_prompt}
+                    ]
+                )
+                content = response.content[0].text
+
+            elif self.provider in ["openai", "openrouter"]:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    temperature=0.1,
+                    max_tokens=2000
+                )
+                content = response.choices[0].message.content
+
+            # Parse JSON response (only if we got content from API)
+            if content is not None:
+                try:
+                    parsed = json.loads(content.strip())
+
+                    # Add missing required fields with defaults
+                    parsed.setdefault('should_increase_proxy', None)
+                    parsed.setdefault('next_bid_amount', None)
+                    parsed.setdefault('max_budget_for_domain', parsed.get('recommended_bid_amount', 0))
+
+                    # Validate and create StrategyDecision object
+                    decision = StrategyDecision(**parsed)
+
+                    return decision
+
+                except (json.JSONDecodeError, ValueError) as e:
+                    print(f"Failed to parse LLM response: {e}")
+                    print(f"Raw content: {content}")
+                    return None
+            else:
+                # API call failed, content never set
+                return None
+
+        except Exception as e:
+            print(f"LLM strategy call failed: {e}")
+            return None
+
+
