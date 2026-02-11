@@ -1,15 +1,33 @@
 """
 Layer 3: Hardcoded Post-Validation
 Validates LLM strategy decisions against safety rules and logical consistency.
+Uses tiered validation: HARD errors block, SOFT errors warn but allow.
 """
-from typing import Dict, Any, Tuple, Optional
+from typing import Dict, Any, Tuple, Optional, List
 from models import AuctionContext, StrategyDecision
+
+
+class ValidationResult:
+    """Container for validation results with severity levels."""
+    def __init__(self):
+        self.errors: List[str] = []      # Hard failures - block the decision
+        self.warnings: List[str] = []    # Soft issues - log but allow
+    
+    @property
+    def is_valid(self) -> bool:
+        return len(self.errors) == 0
+    
+    @property
+    def combined_message(self) -> Optional[str]:
+        if self.errors:
+            return " | ".join(self.errors)
+        return None
 
 
 class StrategyValidator:
     """
     Validates LLM-generated strategy decisions against hard constraints.
-    If validation fails, triggers fallback to rule-based logic.
+    Uses tiered validation: critical errors block, minor issues warn.
     """
 
     @staticmethod
@@ -42,116 +60,203 @@ class StrategyValidator:
         return None
 
     @staticmethod
-    def validate_logical_consistency(decision: StrategyDecision) -> Optional[str]:
+    def validate_do_not_bid_consistency(decision: StrategyDecision) -> Optional[str]:
         """
-        Validate logical consistency within the decision itself.
+        HARD RULE: If strategy is do_not_bid, bid amount must be 0.
+        This is a logical contradiction that cannot be allowed.
         """
-        # Rule 1: If strategy is do_not_bid, bid amount should be 0
         if decision.strategy == "do_not_bid" and decision.recommended_bid_amount > 0:
             return (
                 "LOGICAL INCONSISTENCY: Strategy is 'do_not_bid' but recommended_bid_amount > 0. "
                 "Cannot bid if strategy is to not participate."
             )
+        return None
 
-        # Rule 2: Confidence should match risk level
-        risk_confidence_map = {
-            "low": (0.7, 1.0),    # Low risk needs high confidence
-            "medium": (0.5, 0.8), # Medium risk needs moderate confidence
-            "high": (0.0, 0.6)    # High risk can have lower confidence
+    @staticmethod
+    def validate_confidence_risk_alignment(decision: StrategyDecision) -> Tuple[Optional[str], Optional[str]]:
+        """
+        SOFT RULE: Confidence should roughly match risk level.
+        Returns (hard_error, soft_warning) tuple.
+        
+        - Minor misalignment: Warning only (LLMs aren't perfect calibrators)
+        - Severe misalignment: Hard error (indicates broken reasoning)
+        """
+        # Expanded acceptable ranges (more lenient)
+        acceptable_ranges = {
+            "low": (0.50, 1.0),     # Low risk: confidence 50-100%
+            "medium": (0.35, 0.95), # Medium risk: confidence 35-95%
+            "high": (0.0, 0.80)     # High risk: confidence 0-80%
         }
-
-        min_conf, max_conf = risk_confidence_map[decision.risk_level]
-        if not (min_conf <= decision.confidence <= max_conf):
+        
+        # Severe mismatch thresholds (these trigger hard errors)
+        severe_mismatch_threshold = 0.3  # More than 30% outside range
+        
+        min_conf, max_conf = acceptable_ranges.get(decision.risk_level, (0.0, 1.0))
+        
+        # Check if within acceptable range
+        if min_conf <= decision.confidence <= max_conf:
+            return None, None  # All good
+        
+        # Calculate how far outside the range
+        if decision.confidence < min_conf:
+            deviation = min_conf - decision.confidence
+        else:
+            deviation = decision.confidence - max_conf
+        
+        # Severe mismatch - hard error
+        if deviation > severe_mismatch_threshold:
             return (
-                f"CONFIDENCE MISMATCH: Risk level '{decision.risk_level}' requires confidence "
-                f"between {min_conf:.1f}-{max_conf:.1f}, but got {decision.confidence:.2f}. "
-                f"This suggests miscalibrated risk assessment."
-            )
-
-        # Rule 3: Wait for closeout only makes sense with minimal competition
-        if decision.strategy == "wait_for_closeout":
-            # This will be checked against context in the main validation method
-            pass  # Context-dependent validation happens in validate_all
-
-        return None
+                f"SEVERE CONFIDENCE MISMATCH: Risk '{decision.risk_level}' with confidence "
+                f"{decision.confidence:.2f} is severely misaligned (deviation: {deviation:.2f}). "
+                f"This indicates broken reasoning."
+            ), None
+        
+        # Minor mismatch - warning only
+        return None, (
+            f"CONFIDENCE NOTE: Risk '{decision.risk_level}' with confidence {decision.confidence:.2f} "
+            f"is slightly outside typical range ({min_conf:.1f}-{max_conf:.1f}). Allowing decision."
+        )
 
     @staticmethod
-    def validate_reasoning_quality(decision: StrategyDecision) -> Optional[str]:
+    def validate_reasoning_quality(decision: StrategyDecision) -> Tuple[Optional[str], Optional[str]]:
         """
-        Validate that reasoning is substantive and detailed enough.
-        Prevents superficial or inadequate explanations.
+        SOFT RULE: Reasoning should be substantive.
+        Returns (hard_error, soft_warning) tuple.
+        
+        - Very short reasoning: Hard error (< 50 chars)
+        - Somewhat short: Warning (50-100 chars)
+        - Missing key concepts: Warning only (keywords are imperfect)
         """
-        min_length = 100  # characters
-        if len(decision.reasoning) < min_length:
+        reasoning_length = len(decision.reasoning)
+        
+        # Very short - hard error (likely broken LLM response)
+        if reasoning_length < 50:
             return (
-                f"REASONING INSUFFICIENT: Explanation too brief ({len(decision.reasoning)} chars). "
-                f"Minimum required: {min_length} characters. "
-                f"Strategy decisions require detailed rationale."
-            )
-
-        # Check for meaningful content (not just filler)
+                f"REASONING TOO SHORT: Only {reasoning_length} characters. "
+                f"Minimum 50 required for valid strategy explanation."
+            ), None
+        
+        # Somewhat short - warning
+        warning = None
+        if reasoning_length < 100:
+            warning = f"REASONING BRIEF: {reasoning_length} chars (recommended: 100+)"
+        
+        # Check for meaningful content with expanded keyword list
         reasoning_lower = decision.reasoning.lower()
-        required_keywords = ["profit", "risk", "competition", "strategy"]
-        found_keywords = sum(1 for keyword in required_keywords if keyword in reasoning_lower)
-
-        if found_keywords < 2:
-            return (
-                "REASONING SUPERFICIAL: Explanation lacks depth. "
-                f"Should discuss profit margins, risks, competition, and strategic rationale. "
-                f"Found only {found_keywords} of required elements."
-            )
-
-        return None
+        keyword_groups = [
+            ["profit", "margin", "value", "cost", "price"],     # Financial terms
+            ["risk", "safe", "danger", "careful", "conservative"],  # Risk terms
+            ["competition", "bidder", "opponent", "competitor"],    # Competition terms
+            ["strategy", "approach", "tactic", "plan", "decision"]  # Strategy terms
+        ]
+        
+        # Count how many keyword groups have at least one match
+        groups_matched = sum(
+            1 for group in keyword_groups 
+            if any(keyword in reasoning_lower for keyword in group)
+        )
+        
+        # Need at least 2 out of 4 groups
+        if groups_matched < 2:
+            if warning:
+                warning += f" | Also lacks depth (only {groups_matched}/4 concept areas covered)"
+            else:
+                warning = f"REASONING SHALLOW: Only {groups_matched}/4 key concept areas discussed"
+        
+        return None, warning
 
     @staticmethod
-    def validate_strategy_context_fit(decision: StrategyDecision, context: AuctionContext) -> Optional[str]:
+    def validate_strategy_context_fit(
+        decision: StrategyDecision, 
+        context: AuctionContext
+    ) -> Tuple[Optional[str], Optional[str]]:
         """
-        Validate that strategy makes sense given auction context.
+        MIXED RULE: Strategy should fit context.
+        Returns (hard_error, soft_warning) tuple.
+        
+        Some mismatches are hard errors, others are warnings.
         """
-        # Wait for closeout only with minimal competition
-        if decision.strategy == "wait_for_closeout" and context.num_bidders > 2:
+        # HARD: aggressive_early on very low value domains is likely an error
+        if decision.strategy == "aggressive_early" and context.estimated_value < 200:
             return (
-                "STRATEGY CONTEXT MISMATCH: 'wait_for_closeout' selected but "
-                f"{context.num_bidders} bidders present. Closeout unlikely with competition."
+                f"STRATEGY ERROR: 'aggressive_early' on ${context.estimated_value:.2f} domain. "
+                f"This strategy is reserved for high-value must-have domains (>$500)."
+            ), None
+        
+        # SOFT: wait_for_closeout with some competition - might be valid
+        if decision.strategy == "wait_for_closeout" and context.num_bidders > 3:
+            return None, (
+                f"STRATEGY NOTE: 'wait_for_closeout' with {context.num_bidders} bidders "
+                f"may not succeed. Consider alternative strategies."
             )
-
-        # Aggressive early only for very valuable domains or special cases
+        
+        # SOFT: aggressive_early on medium value - unusual but allow
         if decision.strategy == "aggressive_early" and context.estimated_value < 500:
-            return (
-                "STRATEGY CONTEXT MISMATCH: 'aggressive_early' selected for low-value domain "
-                f"(${context.estimated_value:.2f}). This strategy is for must-have domains only."
+            return None, (
+                f"STRATEGY NOTE: 'aggressive_early' on ${context.estimated_value:.2f} domain "
+                f"is unusual. Typically reserved for >$500 domains."
             )
-
-        # Sniping should consider time remaining
-        if decision.strategy == "last_minute_snipe" and context.hours_remaining > 2:
-            # Allow but warn - could be valid for bot avoidance
-            pass
-
-        return None
+        
+        # SOFT: sniping with lots of time remaining
+        if decision.strategy == "last_minute_snipe" and context.hours_remaining > 4:
+            return None, (
+                f"TIMING NOTE: 'last_minute_snipe' selected with {context.hours_remaining:.1f} hours "
+                f"remaining. May be valid for bot avoidance."
+            )
+        
+        return None, None
 
     @classmethod
     def validate_all(cls, decision: StrategyDecision, context: AuctionContext) -> Tuple[bool, Optional[str]]:
         """
         Run all validation checks on a strategy decision.
-
+        
+        Validation tiers:
+        1. HARD checks (bid ceiling, budget, do_not_bid logic) - must pass
+        2. SOFT checks (confidence, reasoning, context fit) - warnings only unless severe
+        
         Returns:
             (is_valid: bool, error_message: Optional[str])
         """
-        # Run all validation checks
-        checks = [
+        result = ValidationResult()
+        
+        # === HARD CHECKS (Always block on failure) ===
+        hard_checks = [
             lambda: cls.validate_bid_ceiling(decision, context),
             lambda: cls.validate_budget_check(decision, context),
-            lambda: cls.validate_logical_consistency(decision),
+            lambda: cls.validate_do_not_bid_consistency(decision),
+        ]
+        
+        for check_func in hard_checks:
+            error = check_func()
+            if error:
+                result.errors.append(error)
+        
+        # If hard checks failed, return immediately
+        if not result.is_valid:
+            return False, result.combined_message
+        
+        # === SOFT CHECKS (Warnings unless severe) ===
+        soft_checks = [
+            lambda: cls.validate_confidence_risk_alignment(decision),
             lambda: cls.validate_reasoning_quality(decision),
             lambda: cls.validate_strategy_context_fit(decision, context),
         ]
+        
+        for check_func in soft_checks:
+            hard_error, warning = check_func()
+            if hard_error:
+                result.errors.append(hard_error)
+            if warning:
+                result.warnings.append(warning)
+                print(f"VALIDATION WARNING: {warning}")  # Log warnings
+        
+        # Log all warnings for monitoring
+        if result.warnings:
+            print(f"LLM Decision passed with {len(result.warnings)} warning(s)")
+        
+        return result.is_valid, result.combined_message
 
-        for check_func in checks:
-            error = check_func()
-            if error:
-                return False, error
-
-        return True, None
 
 
 

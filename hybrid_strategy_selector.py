@@ -3,9 +3,14 @@ Hybrid Strategy Selector - Main Interface
 Production-grade multi-agent system for domain auction bidding strategy.
 """
 import os
+from datetime import datetime
 from typing import Dict, Any, Optional
 from models import AuctionContext, FinalDecision
+from history.storage import AuctionHistoryStorage
+from history.learning import HistoricalLearning
+from history.models import AuctionOutcome
 from strategy_graph import create_strategy_graph
+from market_intelligence import MarketIntelligenceLoader
 
 
 class HybridStrategySelector:
@@ -20,7 +25,9 @@ class HybridStrategySelector:
         self,
         llm_provider: str = "openrouter",
         model: str = "openai/gpt-5.1",
-        enable_fallback: bool = True
+        enable_fallback: bool = True,
+        mysql_config: Optional[Dict[str, Any]] = None,
+        data_dir: str = "."
     ):
         """
         Initialize the strategy selector.
@@ -29,16 +36,31 @@ class HybridStrategySelector:
             llm_provider: "anthropic" or "openai"
             model: Specific model name
             enable_fallback: Whether to use rule-based fallback if LLM fails
+            mysql_config: MySQL connection config dict with keys: host, port, user, password, database
+                          If None, will use SQLite
         """
         self.llm_provider = llm_provider
         self.model = model
         self.enable_fallback = enable_fallback
+        self.mysql_config = mysql_config
 
         # Set environment variables for LLM access
         self._configure_llm_access()
 
         # Compile the LangGraph
         self.strategy_graph = create_strategy_graph()
+
+
+        # Initialize historical learning
+        if self.mysql_config:
+            self.history_storage = AuctionHistoryStorage(mysql_config = self.mysql_config)
+        else:
+            self.history_storage = AuctionHistoryStorage()
+
+        self.learning = HistoricalLearning(self.history_storage)
+
+        self.market_intelligence = MarketIntelligenceLoader(data_dir=data_dir)
+
 
         # Performance tracking
         self.total_decisions = 0
@@ -66,15 +88,29 @@ class HybridStrategySelector:
         Returns:
             FinalDecision: Structured decision with strategy, reasoning, and proxy details
         """
+
+        last_biddder_id = None 
+
+        market_intel = self.market_intelligence.enrich_context(
+            auction_context,
+            last_bidder_id=last_bidder_id
+        )
+
+        historical_context = self.learning.get_historical_context(auction_context)
         # Validate input
         if not isinstance(auction_context, AuctionContext):
             raise ValueError("auction_context must be an AuctionContext instance")
+
+        
 
         # Prepare initial state with LLM configuration
         initial_state = {
             "auction_context": auction_context.dict(),
             "llm_provider": self.llm_provider,  # Add provider to state
-            "llm_model": self.model,           # Add model to state
+            "llm_model": self.model,   
+            
+            "historical_context": historical_context,
+            "market_intelligence": market_intel,        # Add model to state
 
             # Pre-filter outputs
             "blocked": False,
@@ -157,3 +193,35 @@ class HybridStrategySelector:
         self.llm_success_count = 0
         self.fallback_count = 0
         self.safety_block_count = 0
+
+    
+    def record_outcome(self, auction_context: AuctionContext, decision: FinalDecision, result: str, final_price: float):
+        """ Call this method AFTER auction completes. Thsi enables learning from results."""
+
+        profit_margin = None
+        if result == "won":
+            profit_margin = (auction_context.estimated_value - final_price) / auction_context.estimated_value
+
+        outcome = AuctionOutcome(
+            auction_id=f"{auction_context.domain}_{datetime.utcnow().isoformat()}",
+            domain=auction_context.domain,
+            platform=auction_context.platform,
+            estimated_value=auction_context.estimated_value,
+            current_bid_at_decision=auction_context.current_bid,
+            final_price=final_price,
+            num_bidders=auction_context.num_bidders,
+            hours_remaining_at_decision=auction_context.hours_remaining,
+            bot_detected=auction_context.bidder_analysis.get("bot_detected", False),
+            strategy_used=decision.strategy,
+            recommended_bid=decision.recommended_bid_amount,
+            decision_source=decision.decision_source,
+            confidence=decision.confidence,
+            result=result,
+            profit_margin=profit_margin,
+            opponent_hash=None,
+            raw_data=None
+        )
+
+        self.history_storage.record_outcome(outcome)
+
+

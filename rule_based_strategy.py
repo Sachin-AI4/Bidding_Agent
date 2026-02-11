@@ -3,7 +3,7 @@ Layer 4: Rule-Based Strategy Fallback
 Pure algorithmic strategy selection based on value tiers and auction conditions.
 Used when LLM fails validation or as baseline for comparison.
 """
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from models import AuctionContext, StrategyDecision
 
 
@@ -29,12 +29,20 @@ class RuleBasedStrategySelector:
         return estimated_value * 0.70
 
     @staticmethod
-    def get_high_value_strategy(context: AuctionContext) -> StrategyDecision:
+    def get_high_value_strategy(context: AuctionContext, market_intelligence: Optional[Dict[str, Any]] = None) -> StrategyDecision:
         """
         Strategy logic for high-value domains ($1000+).
         Conservative approach to avoid escalation and protect margins.
         """
         safe_max = RuleBasedStrategySelector.calculate_safe_max(context.estimated_value)
+
+        # Use market intelligence if available
+
+        if market_intelligence:
+            bidder_intel = market_intelligence.get("bidder_intelligence", {})
+            if bidder_intel.get("found")and bidder_intel.get("is_aggressive"):
+
+                safe_max = safe_max * 0.95
 
         # Early stage with no bidders - wait for closeout
         if context.num_bidders == 0 and context.hours_remaining < 1.0:
@@ -109,12 +117,18 @@ class RuleBasedStrategySelector:
         )
 
     @staticmethod
-    def get_medium_value_strategy(context: AuctionContext) -> StrategyDecision:
+    def get_medium_value_strategy(context: AuctionContext, market_intelligence: Optional[Dict[str, Any]] = None) -> StrategyDecision:
         """
         Strategy logic for medium-value domains ($100-1000).
         Balanced approach with flexibility based on competition.
         """
         safe_max = RuleBasedStrategySelector.calculate_safe_max(context.estimated_value)
+
+        # Use market intelligence if available 
+        if market_intelligence:
+            bidder_intel = market_intelligence.get("bidder_intelligence", {})
+            if bidder_intel.get("found") and bidder_intel.get("is_aggressive"):
+                safe_max = safe_max * 0.95
 
         # GoDaddy late-stage rule - sniping respects 5-minute extension
         if (context.platform == "godaddy" and
@@ -145,7 +159,7 @@ class RuleBasedStrategySelector:
                 reasoning=(
                     f"MEDIUM-VALUE COMPETITION: {context.num_bidders} bidders indicate high interest. "
                     f"Using incremental testing starting at ${safe_max * 0.5:.2f} "
-                    f"to gauge competition without overcommitting. "
+                    f"to gauge competition without overcommitting. "    
                     f"Will escalate to full safe max (${safe_max:.2f}) if needed."
                 ),
                 should_increase_proxy=None,
@@ -170,12 +184,16 @@ class RuleBasedStrategySelector:
         )
 
     @staticmethod
-    def get_low_value_strategy(context: AuctionContext) -> StrategyDecision:
+    def get_low_value_strategy(context: AuctionContext, market_intelligence: Optional[Dict[str, Any]] = None) -> StrategyDecision:
         """
         Strategy logic for low-value domains (<$100).
         Aggressive or wait-for-closeout approaches.
         """
         safe_max = RuleBasedStrategySelector.calculate_safe_max(context.estimated_value)
+        if market_intelligence:
+            bidder_intel = market_intelligence.get("bidder_intelligence", {})
+            if bidder_intel.get("found") and bidder_intel.get("is_aggressive"):
+                safe_max = safe_max * 0.95
 
         # No bidders - wait for closeout
         if context.num_bidders == 0:
@@ -213,7 +231,7 @@ class RuleBasedStrategySelector:
         )
 
     @classmethod
-    def get_strategy_decision(cls, context: AuctionContext) -> StrategyDecision:
+    def get_strategy_decision(cls, context: AuctionContext, market_intelligence: Optional[Dict[str, Any]] = None) -> StrategyDecision:
         """
         Main entry point for rule-based strategy selection.
         Routes to appropriate tier-specific logic.
@@ -221,8 +239,8 @@ class RuleBasedStrategySelector:
         value_tier = cls.determine_value_tier(context.estimated_value)
 
         if value_tier == "high":
-            return cls.get_high_value_strategy(context)
+           return cls.get_high_value_strategy(context, market_intelligence=market_intelligence)
         elif value_tier == "medium":
-            return cls.get_medium_value_strategy(context)
+            return cls.get_medium_value_strategy(context, market_intelligence=market_intelligence)
         else:  # low
-            return cls.get_low_value_strategy(context)
+            return cls.get_low_value_strategy(context, market_intelligence=market_intelligence)

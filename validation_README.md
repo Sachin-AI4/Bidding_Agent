@@ -207,3 +207,7 @@ if found_keywords < 2:
 
 This validation layer ensures AI decisions are safe, logical, and appropriate before any bidding actions are taken.
 
+
+
+
+

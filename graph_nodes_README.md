@@ -199,3 +199,8 @@ Each node can emit structured logs:
 This node-based architecture provides the orchestration framework that coordinates the entire multi-agent decision pipeline, ensuring reliable and traceable auction strategy generation.
 
 
+
+
+
+
+

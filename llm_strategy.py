@@ -4,8 +4,42 @@ Uses Claude/GPT to make intelligent bidding strategy decisions.
 """
 import json
 import os
+import time
 from typing import Dict, Any, Optional
+from functools import wraps
 from models import AuctionContext, StrategyDecision
+
+
+
+def retry_with_backoff(max_retries: int = 3, base_delay: float=1.0, max_delay:float =10.0):
+    """Decorator for retry logic with exponential backoff.
+    Args:
+        max_retries: Maximum number of retry attempts
+        base_delay: Initial delay between retries in seconds
+        max_delay: Maximum delay between retries in seconds
+    """
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            last_exception = None
+            for attempt in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    last_exception = e
+
+                    if attempt < max_retries -1:
+                        delay = min(base_delay *(2 ** attempt), max_delay)
+                        print(f"LLM call attempt {attempt + 1} failed: {e}. Retrying in {delay:.1f}s...")
+                        time.sleep(delay)
+                    else:
+                        print(f"LLM call failed after {max_retries} attempts: {e}")
+
+
+            return None
+        return wrapper
+    return decorator
+
 
 
 class LLMStrategySelector:
@@ -124,7 +158,7 @@ You are an expert domain auction strategist with deep knowledge of:
    - <1 hour: Execute final strategy
    - <5 minutes: Sniping mode (GoDaddy extension aware)"""
 
-    def _get_user_prompt(self, context: AuctionContext) -> str:
+    def _get_user_prompt(self, context: AuctionContext, market_intelligence: Optional[Dict[str, Any]] = None) -> str:
         """Generate the user prompt with auction context."""
 
         # Calculate safe financial boundaries
@@ -140,7 +174,44 @@ You are an expert domain auction strategist with deep knowledge of:
             tier_note = "Balanced strategy, test competition"
         else:
             value_tier = "LOW"
-            tier_note = "Aggressive or wait for closeout"
+            tier_note = "Aggressive or wait for closeout   "
+
+        market_intel_section = ""
+
+        if market_intelligence:
+            bidder_intel = market_intelligence.get("bidder_intelligence", {})
+            domain_intel = market_intelligence.get("domain_intelligence", {})
+            archetype = market_intelligence.get("auction_archetype", {})
+
+            market_intel_section = "\n**Market Intelligence (Layer 0)**:\n"
+            
+            if bidder_intel.get("found"):
+                market_intel_section += f"- Bidder Profile: {bidder_intel.get('total_auctions_participated', 0)} auctions, "
+                market_intel_section += f" Win Rate: {bidder_intel.get('win_rate', 0):.1%},"
+                market_intel_section += f" Aggressive:{bidder_intel.get('is_aggressive', False)},"
+                market_intel_section += f" Sniper:{bidder_intel.get('is_sniper', False)}\n"
+
+            elif bidder_intel.get("behavioral_pattern", {}).get("found"):
+
+                bp = bidder_intel["behavioral_pattern"]
+                market_intel_section += f"- Bidder Behavior Pattern: cluster={bp.get('behavior_cluster','unknown')},"
+                market_intel_section += f" fold probability={bp.get('fold_probability', 0):.1%},"
+                market_intel_section += f"avg_win_rate={bp.get('avg_win_rate', 0):.1%},"
+                market_intel_section += f"sample_size={bp.get('sample_size', 0)},"
+                market_intel_section += f"Recommendation={bp.get('strategic_recommendation', 'N/A')}\n"
+
+            if domain_intel.get("found"):
+                market_intel_section += f"- Domain History: {domain_intel.get('number_of_auctions', 0)} past auctions,"
+                market_intel_section += f"Avg Final Price: ${domain_intel.get('average_final_price', 0):.2f},"
+                market_intel_section += f"Volatile:{domain_intel.get('is_volatile', False)}\n"
+
+            if archetype.get("found"):
+                market_intel_section += f"- Auction Archetype: {archetype.get('escalation_speed', 'unknown')}escalation, "
+                market_intel_section += f"Bot Ratio : {archetype.get('bot_ratio', 0):.1%}\n "
+
+        # Debug: Print market intelligence section to verify what's being sent to LLM
+        if market_intelligence:
+            print(f"\n[DEBUG] Market Intelligence Section Being Sent to LLM:\n{market_intel_section}")
 
         # Platform-specific notes
         platform_rules = {
@@ -174,6 +245,7 @@ You are an expert domain auction strategist with deep knowledge of:
 - Avg Reaction Time: {context.bidder_analysis['reaction_time_avg']:.1f}s
 
 **Value Tier**: {value_tier} - {tier_note}
+{market_intel_section}
 
 ## Task
 
@@ -207,14 +279,46 @@ Respond with ONLY a valid JSON object matching this schema:
 
         return prompt
 
-    def get_strategy_decision(self, context: AuctionContext) -> Optional[StrategyDecision]:
+    @retry_with_backoff(max_retries=3, base_delay=1.0, max_delay=10.0)
+    def _call_llm(self,system_prompt: str, user_prompt: str) -> Optional[str]:
+
+        """
+        Make the actual LLM API call with retry logic.
+        Returns the raw response content or raises an exception.
+        """
+        if self.provider == "anthropic":
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=2000,
+                temperature=0.1,
+                system=system_prompt,
+                messages=[
+                    {"role":"user","content":user_prompt}
+                ]
+            )
+            return response.content[0].text
+        
+        elif self.provider in ["openai", "openrouter"]:
+            response= self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role":"system","content":system_prompt},
+                    {"role":"user","content":user_prompt}
+                ],
+                temperature=0.1,
+                max_tokens=2000
+            )
+            return response.choices[0].message.content
+        return None
+
+    def get_strategy_decision(self, context: AuctionContext, market_intelligence: Optional[Dict[str, Any]] = None) -> Optional[StrategyDecision]:
         """
         Get strategy decision from LLM.
         Returns StrategyDecision object or None if LLM call fails.
         """
         try:
             system_prompt = self._get_system_prompt()
-            user_prompt = self._get_user_prompt(context)
+            user_prompt = self._get_user_prompt(context, market_intelligence=market_intelligence)
 
             # Initialize content to avoid scope errors
             content = None
@@ -248,7 +352,7 @@ Respond with ONLY a valid JSON object matching this schema:
             if content is not None:
                 try:
                     parsed = json.loads(content.strip())
-
+ 
                     # Add missing required fields with defaults
                     parsed.setdefault('should_increase_proxy', None)
                     parsed.setdefault('next_bid_amount', None)

@@ -95,6 +95,8 @@ class AuctionState(TypedDict):
     """LangGraph state for the auction strategy workflow"""
     # Input
     auction_context: AuctionContext
+    market_intelligence: Optional[Dict[str, Any]]
+    historical_context: Optional[Dict[str, Any]]
 
     # Pre-filter outputs
     blocked: bool

@@ -59,12 +59,15 @@ def llm_strategy_node(state: AuctionState) -> AuctionState:
     # Get provider and model from state, with defaults
     provider = state.get("llm_provider", "openrouter")
     model = state.get("llm_model", "openai/gpt-5.1")
+
+    # Get market intelligence from state
+    market_intelligence = state.get("market_intelligence")
     
     # Initialize LLM selector with configurable provider
     llm_selector = LLMStrategySelector(provider=provider, model=model)
 
     # Get LLM decision
-    llm_decision = llm_selector.get_strategy_decision(context)
+    llm_decision = llm_selector.get_strategy_decision(context, market_intelligence=market_intelligence)
 
     if llm_decision:
         # Convert to dict for state storage
@@ -123,8 +126,12 @@ def rule_fallback_node(state: AuctionState) -> AuctionState:
 
     context = AuctionContext(**state["auction_context"])
 
+    # Get market intelligence from state
+    market_intelligence = state.get("market_intelligence")
+
+
     # Get rule-based decision
-    rule_decision = RuleBasedStrategySelector.get_strategy_decision(context)
+    rule_decision = RuleBasedStrategySelector.get_strategy_decision(context, market_intelligence = market_intelligence)
 
     # Store as dict
     state["rule_decision"] = rule_decision.dict()
@@ -226,4 +233,3 @@ def finalize_node(state: AuctionState) -> AuctionState:
     state["final_decision"] = final_decision
 
     return state
- 
