@@ -315,7 +315,7 @@ def print_market_intelligence_stats():
         print(f"\nBidder Profiles:")
         print(f"  Total bidders: {len(loader.bidder_profiles)}")
         print(f"  Columns: {list(loader.bidder_profiles.columns)}")
-        
+          
         print(f"\nDomain Stats:")
         print(f"  Total domains: {len(loader.domain_stats)}")
         print(f"  Columns: {list(loader.domain_stats.columns)}")
@@ -329,7 +329,7 @@ def print_market_intelligence_stats():
             print(f"\nSample Bidder Profile:")
             sample = loader.bidder_profiles.iloc[0]
             for col in loader.bidder_profiles.columns[:5]:
-                print(f"  {col}: {sample.get(col, 'N/A')}")
+                print(f"  {col}: {sample.get(col, 'N/A')} ")
         
         if len(loader.domain_stats) > 0:
             print(f"\nSample Domain Stats:")

@@ -117,8 +117,8 @@ You are an expert domain auction strategist with deep knowledge of:
 
 ## Core Principles
 
-1. **Profit First**: Target 60-70% of estimated value for 30%+ profit margins
-2. **Safety Ceiling**: Never recommend bids above 80% of estimated value
+1. **Max Budget**: You may bid up to 100% of estimated value (max budget / APR for the domain).
+2. **Safety Ceiling**: Do not recommend bids above 100% of estimated value (max budget).
 3. **Platform Awareness**: Respect 5-minute extensions and auto-bidding rules
 4. **Opponent Analysis**: Adjust strategy based on bot vs human behavior
 
@@ -158,12 +158,17 @@ You are an expert domain auction strategist with deep knowledge of:
    - <1 hour: Execute final strategy
    - <5 minutes: Sniping mode (GoDaddy extension aware)"""
 
-    def _get_user_prompt(self, context: AuctionContext, market_intelligence: Optional[Dict[str, Any]] = None) -> str:
+    def _get_user_prompt(
+        self,
+        context: AuctionContext,
+        market_intelligence: Optional[Dict[str, Any]] = None,
+        same_auction_attempts: Optional[list] = None,
+    ) -> str:
         """Generate the user prompt with auction context."""
 
-        # Calculate safe financial boundaries
-        safe_max = context.estimated_value * 0.70
-        hard_ceiling = context.estimated_value * 0.80
+        # Calculate financial boundaries (100% = max budget / APR)
+        safe_max = context.estimated_value * 1.0
+        hard_ceiling = context.estimated_value * 1.0
 
         # Determine value tier
         if context.estimated_value >= 1000:
@@ -213,6 +218,19 @@ You are an expert domain auction strategist with deep knowledge of:
         if market_intelligence:
             print(f"\n[DEBUG] Market Intelligence Section Being Sent to LLM:\n{market_intel_section}")
 
+        # Previous attempts in THIS auction (when thread_id is set and we got outbid before)
+        same_auction_section = ""
+        if same_auction_attempts:
+            lines = [
+                f"- Round {a['round']}: strategy={a['strategy_used']}, result={a['result_round']}"
+                for a in (same_auction_attempts or [])
+            ]
+            same_auction_section = (
+                "\n**Previous attempts in THIS auction**:\n"
+                + "\n".join(lines)
+                + "\nConsider trying a different strategy if a previous one did not work (e.g. outbid).\n"
+            )
+
         # Platform-specific notes
         platform_rules = {
             "godaddy": "5-minute extension on late bids. Snipe timing must account for auto-extensions.",
@@ -231,8 +249,8 @@ You are an expert domain auction strategist with deep knowledge of:
 - Current Bid: ${context.current_bid:.2f}
 - Your Current Proxy: ${context.your_current_proxy:.2f} (0 = none)
 - Budget Available: ${context.budget_available:.2f}
-- Safe Max (70% of value): ${safe_max:.2f}
-- Hard Ceiling (80% of value): ${hard_ceiling:.2f}
+- Safe Max (100% max budget): ${safe_max:.2f}
+- Hard Ceiling (100% of value): ${hard_ceiling:.2f}
 
 **Competition**:
 - Active Bidders: {context.num_bidders}
@@ -246,12 +264,13 @@ You are an expert domain auction strategist with deep knowledge of:
 
 **Value Tier**: {value_tier} - {tier_note}
 {market_intel_section}
+{same_auction_section}
 
 ## Task
 
 Analyze this auction and recommend the optimal bidding strategy. Consider:
 
-1. **Profit Potential**: Can we achieve 30%+ margin within safe limits?
+1. **Budget**: Stay within estimated value (max budget / APR).
 2. **Competition**: How many bidders and their behavior patterns?
 3. **Platform Mechanics**: How do {context.platform} rules affect timing?
 4. **Risk Assessment**: What's the likelihood of overpaying?
@@ -275,7 +294,7 @@ Respond with ONLY a valid JSON object matching this schema:
 - recommended_bid_amount = your proxy maximum (what you set, not next visible bid)
 - confidence = certainty in your strategy (0.0-1.0)
 - reasoning = minimum 100 characters explaining your logic
-- Stay within safe financial boundaries"""
+- Stay within max budget (estimated value)"""
 
         return prompt
 
@@ -308,17 +327,27 @@ Respond with ONLY a valid JSON object matching this schema:
                 temperature=0.1,
                 max_tokens=2000
             )
-            return response.choices[0].message.content
+            return response.choices[0 ].message.content
         return None
 
-    def get_strategy_decision(self, context: AuctionContext, market_intelligence: Optional[Dict[str, Any]] = None) -> Optional[StrategyDecision]:
+    def get_strategy_decision(
+        self,
+        context: AuctionContext,
+        market_intelligence: Optional[Dict[str, Any]] = None,
+        historical_context: Optional[Dict[str, Any]] = None,
+    ) -> Optional[StrategyDecision]:
         """
         Get strategy decision from LLM.
         Returns StrategyDecision object or None if LLM call fails.
         """
         try:
+            same_auction_attempts = (historical_context or {}).get("same_auction_attempts") or []
             system_prompt = self._get_system_prompt()
-            user_prompt = self._get_user_prompt(context, market_intelligence=market_intelligence)
+            user_prompt = self._get_user_prompt(
+                context,
+                market_intelligence=market_intelligence,
+                same_auction_attempts=same_auction_attempts,
+            )
 
             # Initialize content to avoid scope errors
             content = None

@@ -1,0 +1,1163 @@
+================================================================================
+DOMAIN AUCTION BIDDING AGENT — COMPLETE TECHNICAL DOCUMENTATION
+================================================================================
+
+Purpose:  Knowledge Transfer (KT) Document for the Domain Auction Strategy Agent
+Audience: Junior developers joining the project
+Use:      Reference guide for understanding how the system works, what each part
+          does, and how to use and extend it
+
+================================================================================
+CHAPTER 1: WHAT IS THIS AGENT?
+================================================================================
+
+1.1 Purpose
+-----------
+This is an AI-powered bidding strategy agent for domain name auctions. When you
+are participating in a domain auction (e.g., buying a domain on GoDaddy, NameJet,
+or Dynadot), this agent helps you decide:
+
+  - What strategy to use — should you set a maximum proxy early, snipe at the
+    last minute, test the competition incrementally, wait for the auction to end
+    quietly, or just walk away?
+  - How much to bid — what is the safe maximum you can bid while still making
+    a profit?
+  - What to do with your proxy — should you increase your current proxy bid,
+    and to what amount?
+  - Why — a detailed explanation of the decision in natural language.
+
+
+1.2 Core Business Problem
+--------------------------
+When buying domains for resale, profit depends on not overpaying. The agent
+enforces a discipline:
+
+  - Target buying at 60–70% of estimated value (leaving 30%+ profit margin
+    after resale).
+  - Never bid above 80% of estimated value (hard ceiling).
+  - Never concentrate too much budget in one domain.
+  - Never bid when the current market price has already exceeded safe levels.
+
+Without this agent, a human bidder would have to manually track all of these
+rules, respond to bot bidders in real time, calculate safe maximums, and manage
+a portfolio of simultaneous auctions — which is error-prone and emotionally
+driven.
+
+
+1.3 What It Is Not
+-------------------
+  - It does not place bids automatically on the auction platform. It recommends
+    what to bid; you or an orchestration layer must execute.
+  - It does not scrape auction websites. You must provide it with the current
+    auction state.
+  - It does not guarantee a win. It optimizes for profit, not win rate.
+
+
+================================================================================
+CHAPTER 2: SYSTEM ARCHITECTURE OVERVIEW
+================================================================================
+
+2.1 High-Level Flow
+--------------------
+The agent receives a description of one auction (the "AuctionContext") and
+returns one decision (the "FinalDecision"). Internally it passes through a
+pipeline of layers, implemented as a LangGraph multi-agent workflow.
+
+The high-level flow is:
+
+  INPUT (AuctionContext)
+    -> Market Intelligence Enrichment
+    -> Safety Pre-Filter
+    -> LLM Strategy Decision
+    -> LLM Validation
+    -> Rule-Based Fallback (if needed)
+    -> Proxy Logic
+    -> Finalize
+    -> OUTPUT (FinalDecision)
+
+
+2.2 Technology Stack
+---------------------
+  - Python        — All agent code is written in Python.
+  - Pydantic      — For data validation and modeling (AuctionContext,
+                    FinalDecision, etc.).
+  - LangGraph     — Framework for building multi-agent, multi-step AI
+                    workflows. The bidding pipeline is implemented as a
+                    LangGraph StateGraph where each node is a processing step.
+  - LLM           — Used for intelligent strategy reasoning. Supports
+                    OpenAI/OpenRouter (e.g., GPT models) and Anthropic (Claude).
+                    Configured via environment variables.
+  - Pandas/Parquet — For loading pre-processed historical market intelligence
+                    from parquet files.
+  - Supabase      — For persisting auction outcomes and learning from results
+    (PostgreSQL)    over time.
+
+
+2.3 Files Overview
+-------------------
+Here is every file in the project and its responsibility:
+
+  CORE FILES:
+  +---------------------------------+------------------------------------------+
+  | File                            | Responsibility                           |
+  +---------------------------------+------------------------------------------+
+  | models.py                       | All Pydantic data models: AuctionContext, |
+  |                                 | StrategyDecision, ProxyDecision,         |
+  |                                 | FinalDecision, AuctionState              |
+  +---------------------------------+------------------------------------------+
+  | hybrid_strategy_selector.py     | Main entry point. Orchestrates the       |
+  |                                 | entire pipeline. Call select_strategy()  |
+  |                                 | here.                                    |
+  +---------------------------------+------------------------------------------+
+  | strategy_graph.py               | Defines the LangGraph workflow — which   |
+  |                                 | nodes exist and how they connect         |
+  +---------------------------------+------------------------------------------+
+  | graph_nodes.py                  | Implements each node in the graph:       |
+  |                                 | safety, LLM, validation, fallback,       |
+  |                                 | proxy, finalize                          |
+  +---------------------------------+------------------------------------------+
+  | market_intelligence.py          | Loads parquet data files and enriches    |
+  |                                 | auction context with historical          |
+  |                                 | intelligence                             |
+  +---------------------------------+------------------------------------------+
+  | safety_filters.py               | Hard safety rules: overpayment,          |
+  |                                 | portfolio concentration, minimum budget  |
+  +---------------------------------+------------------------------------------+
+  | llm_strategy.py                 | Builds prompts and calls the LLM to     |
+  |                                 | get a strategy decision                  |
+  +---------------------------------+------------------------------------------+
+  | validation.py                   | Validates the LLM's decision against     |
+  |                                 | hard rules                               |
+  +---------------------------------+------------------------------------------+
+  | rule_based_strategy.py          | Deterministic fallback: if LLM fails,   |
+  |                                 | use rule-based logic                     |
+  +---------------------------------+------------------------------------------+
+  | proxy_logic.py                  | Calculates proxy bid adjustments         |
+  |                                 | (increase, maintain, accept loss)        |
+  +---------------------------------+------------------------------------------+
+  | history/models.py               | Data models for historical storage:      |
+  |                                 | AuctionOutcome, StrategyPerformance,     |
+  |                                 | OpponentProfile                          |
+  +---------------------------------+------------------------------------------+
+  | history/storage.py              | Supabase storage layer for saving and    |
+  |                                 | querying auction outcomes                |
+  +---------------------------------+------------------------------------------+
+  | history/learning.py             | Uses historical data to generate         |
+  |                                 | insights for current decisions           |
+  +---------------------------------+------------------------------------------+
+
+  TEST FILES:
+  +---------------------------------+------------------------------------------+
+  | test_strategy_system.py         | Main test suite — 15 scenarios end-to-   |
+  |                                 | end                                      |
+  +---------------------------------+------------------------------------------+
+  | test_whole_agent.py             | Tests full pipeline without Supabase     |
+  |                                 | dependency                               |
+  +---------------------------------+------------------------------------------+
+  | test_market_intelligence.py     | Tests market intelligence loading and    |
+  |                                 | enrichment                               |
+  +---------------------------------+------------------------------------------+
+  | test_agent_standalone.py        | Standalone agent tests                   |
+  +---------------------------------+------------------------------------------+
+
+  DATA FILES (read-only):
+  +-----------------------------------------+----------------------------------+
+  | layer0_bidder_profiles.parquet          | Historical bidder statistics     |
+  |                                         | (win rate, aggression, etc.)     |
+  +-----------------------------------------+----------------------------------+
+  | layer0_domain_stats.parquet             | Historical domain sale prices    |
+  |                                         | and volatility                   |
+  +-----------------------------------------+----------------------------------+
+  | layer0_auction_archetypes.parquet       | Auction behavior patterns        |
+  |                                         | (escalation speed, late bids)    |
+  +-----------------------------------------+----------------------------------+
+
+
+================================================================================
+CHAPTER 3: DATA MODELS — WHAT GOES IN AND WHAT COMES OUT
+================================================================================
+
+3.1 AuctionContext (the INPUT)
+-------------------------------
+This is what you must provide to the agent when calling it. Think of it as the
+"current state of the auction" plus "your situation as a bidder."
+
+  DOMAIN AND PLATFORM FIELDS:
+  - domain         : The domain name being auctioned, e.g. "PremiumDomain.com".
+  - platform       : Which auction platform. Must be one of: "godaddy",
+                     "namejet", or "dynadot". This matters because each platform
+                     has different rules (GoDaddy extends by 5 minutes, NameJet
+                     has no extensions, etc.).
+
+  FINANCIAL FIELDS:
+  - estimated_value      : The domain's estimated resale value (provided by you
+                           or your valuation API). This is the most important
+                           input — all safety rules, bid calculations, and profit
+                           margins are based on this number.
+  - current_bid          : The current highest bid in the auction right now.
+  - your_current_proxy   : The maximum proxy bid you have already set for this
+                           auction. Zero if you have not bid yet.
+  - budget_available     : Your remaining total budget across all auctions. Used
+                           for portfolio concentration checks.
+
+  COMPETITION FIELDS:
+  - num_bidders          : Number of active bidders currently in the auction.
+  - hours_remaining      : How many hours are left until the auction closes.
+
+  BIDDER ANALYSIS FIELDS (a nested object with 4 sub-fields):
+  - bot_detected         : True/False — whether a bot has been identified.
+  - corporate_buyer      : True/False — whether a corporate buyer is present.
+  - aggression_score     : 0 to 10 — how aggressive the bidders are.
+  - reaction_time_avg    : Average reaction time in seconds (e.g., 5 seconds
+                           for a fast bot, 120 seconds for a human).
+
+  IMPORTANT NOTE about estimated_value:
+  The agent does not calculate this itself. It comes from an external source —
+  either you set it manually or you call a separate valuation agent API. The
+  bidding agent receives it as a given input in AuctionContext.
+
+
+3.2 FinalDecision (the OUTPUT)
+--------------------------------
+This is what the agent returns after processing the auction:
+
+  - strategy              : The recommended bidding strategy (see strategy types
+                            below).
+  - recommended_bid_amount: The proxy maximum the LLM recommends (your ceiling).
+  - should_increase_proxy : True/False — whether you should update your current
+                            proxy bid on the platform.
+  - next_bid_amount       : The next visible bid that will appear if you increase
+                            your proxy (current bid + platform increment).
+  - max_budget_for_domain : The absolute maximum this agent will let you spend
+                            on this domain (set to safe max = 70% of value).
+  - risk_level            : "low", "medium", or "high".
+  - confidence            : 0.0 to 1.0. How confident the agent is.
+  - reasoning             : A detailed natural-language explanation of why this
+                            strategy was chosen. Read this to understand or
+                            explain the decision.
+  - proxy_decision        : A nested object with full proxy analysis: current
+                            proxy, current bid, safe max, proxy action
+                            ("increase_proxy", "maintain_proxy", or
+                            "accept_loss"), and explanation.
+  - decision_source       : Where the decision came from: "llm" (AI made it),
+                            "rules_fallback" (AI failed, rules used),
+                            "safety_block" (blocked before AI), or
+                            "system_error".
+
+
+3.3 Strategy Types
+-------------------
+The agent can recommend one of six strategies:
+
+  - proxy_max          : Set your maximum proxy bid now and let the platform
+                         auto-bid incrementally on your behalf. Use for low-
+                         competition situations or when you want passive
+                         participation.
+
+  - last_minute_snipe  : Wait until near the end of the auction, then place your
+                         maximum proxy in the final minutes. This prevents others
+                         from reacting and limits how much a bot can escalate.
+
+  - incremental_test   : Place a series of small bids to test how aggressive the
+                         competition is before committing. Used when competition
+                         level is unclear.
+
+  - wait_for_closeout  : Do nothing; wait for the auction to close and only bid
+                         if no one else bids. Best for low-value domains with no
+                         interest.
+
+  - aggressive_early   : Rare. Place a strong bid early to signal dominance and
+                         potentially discourage others. Reserved for must-have,
+                         high-value domains.
+
+  - do_not_bid         : Walk away. Profit is impossible, risk is too high, or
+                         safety rules have been violated.
+
+
+================================================================================
+CHAPTER 4: MARKET INTELLIGENCE (LAYER 0)
+================================================================================
+
+4.1 What It Is
+---------------
+Before making any decision, the agent enriches the AuctionContext with "Layer 0
+market intelligence" — historical data and patterns loaded from pre-processed
+parquet files. This intelligence is computed once at startup (when the agent
+initializes) and then looked up quickly for each auction.
+
+File responsible: market_intelligence.py, class MarketIntelligenceLoader.
+
+
+4.2 The Three Parquet Files
+----------------------------
+layer0_bidder_profiles.parquet
+  Contains historical statistics about known bidders, indexed by bidder ID or
+  bidder name. Each row represents one bidder and contains fields such as total
+  auctions participated, total bids, average bid increase, maximum bid ever
+  placed, win rate, late bid ratio (how often they bid in the last phase),
+  average reaction time, and proxy usage ratio.
+
+layer0_domain_stats.parquet
+  Contains historical sale statistics about known domains. Each row represents
+  one domain and contains the average final sale price, average number of bids,
+  price volatility score, and other pricing patterns.
+
+layer0_auction_archetypes.parquet
+  Contains aggregated auction behavior patterns. Contains fields such as the
+  average late bid ratio across auctions, the average bid jump size, and average
+  auction duration in seconds.
+
+
+4.3 What the Agent Computes from This Data
+-------------------------------------------
+BIDDER INTELLIGENCE:
+  If a bidder ID is provided, the agent looks up that bidder in the profiles
+  parquet and returns their stats. From these raw stats, two derived flags are
+  computed:
+
+  - is_aggressive is set to True if the bidder's average bid increase exceeds
+    50. This threshold is defined in market_intelligence.py.
+  - is_sniper is set to True if the bidder's late bid ratio exceeds 0.7,
+    meaning they place more than 70% of their bids in the late phase of the
+    auction.
+
+  If no exact bidder match is found, the agent falls back to behavioral pattern
+  matching — it finds similar bidders in the parquet using the live auction's
+  aggression score and reaction time, and returns a behavioral cluster (e.g.,
+  "professional", "casual", "sniper") along with a fold probability and a
+  strategic recommendation.
+
+DOMAIN INTELLIGENCE uses a four-tier fallback system:
+  - Tier 1 (Exact match)    : Find the exact domain in the domain stats parquet.
+  - Tier 2 (TLD pattern)    : If not found, look at all domains with the same
+                               TLD (e.g., all .com) and return their average
+                               price, volatility, and percentiles.
+  - Tier 3 (Value tier)     : If still not found, look at all domains with a
+                               similar estimated value (within ±30%) and return
+                               their average price.
+  - Tier 4 (Platform avg)   : Last resort — use average price across all known
+                               domains.
+
+AUCTION ARCHETYPE:
+  The agent computes the average bid jump across all auctions in the archetypes
+  parquet. If this average exceeds 50, the archetype is labeled "fast
+  escalation"; otherwise "slow escalation". The bot_ratio field is currently
+  hardcoded to 0.0 because the parquet does not contain this column.
+
+WIN PROBABILITY:
+  Estimated based on current bid vs. safe max, number of bidders, opponent's
+  win rate, whether a bot is present, and hours remaining. Gives a probability
+  (0.0 to 1.0) of winning at the recommended price.
+
+EXPECTED VALUE ANALYSIS:
+  Calculates EV (expected value), ROI, and risk-adjusted EV using win
+  probability and the estimated domain value.
+
+RESOURCE OPTIMIZATION SCORE:
+  A 0–10 score combining win probability, expected margin, and ROI, indicating
+  how efficiently this auction would use your capital.
+
+
+4.4 What Currently Reaches the LLM
+-------------------------------------
+At the time of writing, the LLM prompt includes only a subset of the above
+intelligence:
+  - Bidder profile (if found): total auctions, win rate, is_aggressive,
+    is_sniper.
+  - Behavioral pattern (if no exact bidder): cluster, fold probability,
+    avg win rate, recommendation.
+  - Domain history: average final price, number of past auctions, is_volatile.
+  - Auction archetype: escalation speed, bot ratio.
+
+The following are computed but do NOT currently appear in the LLM prompt:
+  win probability, expected value, risk-adjusted EV, resource optimization
+  score. Adding these to the prompt is a known pending improvement.
+
+
+================================================================================
+CHAPTER 5: THE LANGGRAPH PIPELINE — STEP BY STEP
+================================================================================
+
+5.1 What Is LangGraph?
+-----------------------
+LangGraph is a framework for building multi-step AI workflows where each step
+(called a "node") processes and transforms a shared "state" object. The state
+is passed from node to node. Each node can read any field from the state, modify
+fields, and pass the updated state to the next node.
+
+In this agent, the state is called AuctionState and contains: the auction
+context, market intelligence, historical context, whether the auction was
+blocked, the LLM's decision, whether that decision is valid, the rule-based
+fallback decision, the proxy analysis, and the final decision.
+
+The flow is defined in strategy_graph.py and the nodes are implemented in
+graph_nodes.py.
+
+
+5.2 Node 1: Safety Pre-Filter
+-------------------------------
+File: safety_filters.py, called from graph_nodes.py (safety_prefilter_node)
+
+This is the first node. It runs three hard safety checks before anything else
+happens. If any check fails, the auction is "blocked" immediately — the LLM is
+never called, and the final decision is set to "do_not_bid" with a clear reason.
+
+  Check 1 — Overpayment Protection:
+    If the current bid already exceeds 130% of estimated value, block.
+    Rationale: the auction is already in "winner's curse" territory where buying
+    the domain would destroy value.
+
+  Check 2 — Portfolio Concentration:
+    If the domain's estimated value would consume more than 50% of your remaining
+    budget, block. Rationale: no single domain should take up half your capital.
+    Diversification is enforced.
+
+  Check 3 — Minimum Budget:
+    If your available budget is below $100, block. Rationale: bidding with less
+    than $100 is not meaningful and leads to poor decisions.
+
+If all three checks pass, the state continues to the LLM strategy node.
+
+
+5.3 Node 2: LLM Strategy
+--------------------------
+File: llm_strategy.py, called from graph_nodes.py (llm_strategy_node)
+
+This node calls the LLM with a carefully structured prompt. It only runs if the
+auction was not blocked in the previous step.
+
+  THE SYSTEM PROMPT defines the AI's role: domain auction strategist with
+  knowledge of proxy bidding mechanics, platform rules (GoDaddy's 5-minute
+  extension, NameJet's no-extension rule, Dynadot's variable increments),
+  bidder psychology, and profit margin optimization. It explains the six
+  strategy options, platform-specific rules, and a decision framework for value
+  tiers, competition levels, bot detection, and time pressure.
+
+  THE USER PROMPT is built dynamically for each auction. It includes:
+    - The domain, platform, and platform-specific rules.
+    - Financial data: estimated value, current bid, your proxy, budget, safe max
+      (70% of value), hard ceiling (80% of value).
+    - Competition data: number of bidders, hours remaining.
+    - Bidder analysis: bot detected, corporate buyer, aggression score,
+      reaction time.
+    - Market intelligence section (bidder profile, domain history, archetype).
+    - A task section asking the LLM to analyze the auction and recommend a
+      strategy.
+    - A required JSON output format: strategy, recommended_bid_amount,
+      confidence, risk_level, reasoning.
+
+  THE LLM RESPONSE is parsed as JSON and validated into a StrategyDecision
+  Pydantic object. If parsing fails or the LLM returns invalid JSON, the
+  decision is set to None and the pipeline will use the rule-based fallback.
+
+  The LLM call includes retry logic with exponential backoff (up to 3 attempts,
+  starting with 1-second delay, up to 10 seconds).
+
+  Temperature is set to 0.1 — near-deterministic — so that the LLM produces
+  consistent, analytical outputs rather than creative, varied ones.
+
+
+5.4 Node 3: LLM Validation
+----------------------------
+File: validation.py, called from graph_nodes.py (llm_validation_node)
+
+After the LLM produces a decision, this node checks it against hard rules.
+There are two tiers of validation:
+
+  HARD CHECKS (block if failed):
+    1. Bid ceiling: The LLM's recommended bid cannot exceed 80% of estimated
+       value. If it does, the decision is invalid.
+    2. Budget check: The recommended bid cannot exceed your available budget.
+    3. do_not_bid consistency: If strategy is "do_not_bid", the recommended bid
+       amount must be 0.
+
+  SOFT CHECKS (log warning, allow decision):
+    1. Confidence-risk alignment: Confidence should match risk level.
+       Low risk: 50–100% confidence.
+       Medium risk: 35–95% confidence.
+       High risk: 0–80% confidence.
+       A severe mismatch (deviation > 0.3) becomes a hard error.
+    2. Reasoning quality: Reasoning must be at least 50 characters long (hard
+       error below 50). Warning if less than 100 characters, or if the reasoning
+       doesn't cover at least 2 of 4 concept areas (financial, risk, competition,
+       strategy).
+    3. Strategy-context fit: "aggressive_early" on a very low-value domain
+       (< $200) is a hard error; "last_minute_snipe" with more than 4 hours
+       remaining generates a warning.
+
+  If all hard checks pass, llm_valid is set to True and the pipeline routes
+  to the proxy logic node.
+  If any hard check fails, llm_valid is set to False and the pipeline routes
+  to the rule fallback node.
+
+
+5.5 Node 4 (conditional): Rule-Based Fallback
+-----------------------------------------------
+File: rule_based_strategy.py, called from graph_nodes.py (rule_fallback_node)
+
+This node only runs when the LLM decision is invalid. It produces a
+deterministic, rule-based strategy using simple if-then logic based on value
+tier, bidder count, platform, and bot detection.
+
+  HIGH-VALUE DOMAINS ($1000+):
+    - No bidders and < 1 hour left        -> wait_for_closeout
+    - Bot detected                         -> last_minute_snipe
+    - 1-2 bidders                          -> proxy_max
+    - 3+ bidders                           -> last_minute_snipe (avoid war)
+
+  MEDIUM-VALUE DOMAINS ($100-999):
+    - GoDaddy with < 1 hour left           -> last_minute_snipe
+    - More than 5 bidders                  -> incremental_test (start at 50%
+                                              of safe max)
+    - Otherwise                            -> proxy_max
+
+  LOW-VALUE DOMAINS (< $100):
+    - No bidders                           -> wait_for_closeout
+    - Any bidders                          -> incremental_test (capped at $50)
+
+  In all cases, if market intelligence shows the opponent is aggressive,
+  safe_max is reduced by 5% (multiplied by 0.95) to protect margins.
+
+
+5.6 Node 5: Proxy Logic
+-------------------------
+File: proxy_logic.py, called from graph_nodes.py (proxy_logic_node)
+
+This node takes the chosen strategy (from LLM or rules) and translates it into
+a concrete proxy decision: should you increase your current proxy, to what
+amount, and what will the next visible bid be?
+
+  Safe max = 70% of estimated value. This is the maximum the proxy logic will
+  ever set.
+
+  PLATFORM INCREMENTS:
+    - GoDaddy  : $5 flat increment.
+    - NameJet  : $5 flat increment.
+    - Dynadot  : max($5, 5% of current bid) — variable, higher bids cost more
+                 per step.
+
+  THREE SCENARIOS:
+
+  Scenario 1 — No proxy set yet (your_current_proxy = 0):
+    The system sets a new proxy. The new proxy max is the minimum of safe_max,
+    your budget, and 80% of estimated value. The next bid shown will be
+    current_bid plus one increment.
+
+  Scenario 2 — Current bid is at or above safe max:
+    Profit is impossible if you bid further. Proxy action is "accept_loss":
+    do not increase proxy, change the strategy to "do_not_bid", set recommended
+    bid to 0, reduce confidence, and append the reason to the reasoning.
+
+  Scenario 3 — You have a proxy but you've been outbid and safe max is still
+               above current bid:
+    Your current proxy is insufficient. Calculate a new proxy max as the minimum
+    of safe_max, budget, and 80% of value. Set proxy action to "increase_proxy"
+    with the new max and next bid amount.
+
+  IMPORTANT OVERRIDE:
+    If proxy action is "accept_loss", the strategy in the final decision is
+    forcibly changed to "do_not_bid" and the recommended bid is set to 0,
+    regardless of what the LLM or rules said. This is the one place where a
+    post-LLM override can change the LLM's strategy.
+
+
+5.7 Node 6: Finalize
+----------------------
+File: graph_nodes.py (finalize_node)
+
+This is the last node. It assembles the final decision:
+
+  - If the auction was blocked by safety filters, the final decision was already
+    set in the safety node; this node does nothing.
+  - If proxy analysis is available (normal case), it combines the strategy
+    decision with the proxy analysis into one FinalDecision object.
+  - If neither is available (system error), it returns a safe "do_not_bid"
+    with "system_error" source.
+
+
+================================================================================
+CHAPTER 6: HOW THE AGENT IS CALLED
+================================================================================
+
+6.1 Using HybridStrategySelector (with Supabase)
+--------------------------------------------------
+The HybridStrategySelector class in hybrid_strategy_selector.py is the main
+entry point for production use. It:
+
+  - Initializes market intelligence (loads parquet files once).
+  - Connects to Supabase for history storage.
+  - Compiles the LangGraph.
+  - Exposes select_strategy(auction_context) to run the full pipeline.
+  - Exposes record_outcome(auction_context, decision, result, final_price) to
+    save the result after an auction finishes.
+  - Tracks performance metrics: total decisions, LLM success count, fallback
+    count, safety block count.
+
+  TO USE IT:
+    1. Set environment variables SUPABASE_URL and SUPABASE_KEY (and your LLM
+       API key).
+    2. Create an instance (this loads parquet files and connects to Supabase).
+    3. For each auction, build an AuctionContext with the current auction state.
+    4. Call select_strategy(context) to get a FinalDecision.
+    5. Execute the bid on the platform according to the decision.
+    6. After the auction ends, call record_outcome(context, decision,
+       "won" or "lost", final_price).
+
+
+6.2 Using the Graph Directly (without Supabase — for testing)
+--------------------------------------------------------------
+For testing without a database, you can invoke the LangGraph directly. This is
+what the test files do. The steps are:
+
+    1. Load market intelligence manually using
+       MarketIntelligenceLoader.enrich_context().
+    2. Build the initial_state dictionary with the auction context and market
+       intelligence.
+    3. Call create_strategy_graph().invoke(initial_state).
+    4. Read result_state["final_decision"] and result_state["decision_source"].
+
+This bypasses the HybridStrategySelector entirely, avoiding the Supabase
+dependency.
+
+
+================================================================================
+CHAPTER 7: HISTORY AND LEARNING SYSTEM
+================================================================================
+
+7.1 Purpose
+------------
+The history system allows the agent to learn from past auction outcomes over
+time. After each auction, you record what happened. The agent can then use this
+history to improve future decisions.
+
+
+7.2 What Is Stored in Supabase
+--------------------------------
+TABLE: auction_outcomes
+
+  One row per completed auction. Stores:
+  - Full context at decision time: domain, platform, estimated value, current
+    bid at decision, num bidders, hours remaining, bot detected.
+  - The agent's decision: strategy used, recommended bid, decision source,
+    confidence.
+  - The actual outcome: result (won/lost/abandoned), final price, profit
+    margin if won, opponent hash.
+  - raw_data: Full AuctionOutcome object as a JSONB snapshot.
+
+TABLE: strategy_performance
+
+  Aggregated stats per (strategy, platform, value_tier) combination. Tracks
+  total uses, total wins, and total profit. Updated automatically every time
+  you call record_outcome(). Used by the learning module to find which strategy
+  performs best for a given context.
+
+TABLE: opponent_profiles
+
+  Defined in the schema but not yet written to by the current code. Intended
+  for tracking recurring opponents: their bot likelihood, reaction time,
+  aggression, win/loss record against you.
+
+
+7.3 How Learning Works
+-----------------------
+The HistoricalLearning class in history/learning.py provides two main
+capabilities:
+
+  get_historical_context(auction_context):
+    For a given auction, queries Supabase for similar past auctions (same
+    platform, similar estimated value ±30%, up to 10 results). Calculates
+    insights: your win rate in those auctions, the average final price as a
+    ratio of estimated value, and which strategies won the most in those
+    situations. Also queries strategy performance for all strategies in this
+    context and identifies the historically best strategy. Returns all of this
+    as a dictionary. This data is passed into the graph state and available in
+    the pipeline, but is not yet formatted into the LLM prompt.
+
+  suggest_dynamic_threshold(auction_context):
+    Suggests an adjusted safe_max ratio based on historical outcomes.
+    - If similar auctions typically close at < 60% of value, lower the
+      threshold to 65%.
+    - If they close at > 75%, raise it to 73%.
+    - If your win rate is low, raise the threshold to bid more to win.
+    - If your win rate is high, lower it (you're winning at good prices).
+    This method is implemented but not yet called in the main pipeline.
+
+
+7.4 When History Is Saved
+--------------------------
+History is only saved when you explicitly call selector.record_outcome() after
+an auction finishes. Nothing is saved at decision time. You must provide the
+actual final price and result. If you do not call record_outcome(), the history
+tables remain empty and the learning system has no data to work with.
+
+
+================================================================================
+CHAPTER 8: SAFETY RULES SUMMARY
+================================================================================
+
+8.1 Pre-Execution Safety (blocks LLM entirely)
+
+  These run before the LLM is called. If triggered, returns "do_not_bid"
+  immediately.
+
+  +----------------------------+-----------------------------------------+----------+
+  | Rule                       | Condition                               | Threshold|
+  +----------------------------+-----------------------------------------+----------+
+  | Overpayment protection     | current_bid > estimated_value × 1.30   | 130%     |
+  | Portfolio concentration    | estimated_value > budget × 0.50        | 50%      |
+  | Minimum budget             | budget_available < $100                 | $100     |
+  +----------------------------+-----------------------------------------+----------+
+
+
+8.2 Post-LLM Validation (blocks the LLM's specific decision)
+
+  These run after the LLM returns. If triggered, decision is invalid and
+  rule-based fallback is used.
+
+  +-------------------------------+----------------------------------------------+
+  | Rule                          | Condition                                    |
+  +-------------------------------+----------------------------------------------+
+  | Bid ceiling                   | recommended_bid > estimated_value × 0.80    |
+  | Budget violation              | recommended_bid > budget_available           |
+  | Logical inconsistency         | strategy = "do_not_bid" but bid > 0          |
+  | Severe confidence mismatch    | confidence deviates > 0.30 from range        |
+  | Reasoning too short           | reasoning length < 50 characters             |
+  | Strategy-context hard error   | aggressive_early on domain < $200            |
+  +-------------------------------+----------------------------------------------+
+
+
+8.3 Post-Proxy Override (overrides any strategy/bid)
+
+  This runs after proxy logic. If triggered, forcibly changes the final
+  decision.
+
+  +-------------------+----------------------------------+---------------------+
+  | Rule              | Condition                        | Action              |
+  +-------------------+----------------------------------+---------------------+
+  | Profit impossible | safe_max (70% of value)          | Override strategy   |
+  |                   | <= current_bid                   | to "do_not_bid",    |
+  |                   |                                  | set bid to 0        |
+  +-------------------+----------------------------------+---------------------+
+
+
+================================================================================
+CHAPTER 9: FINANCIAL CALCULATION RULES
+================================================================================
+
+9.1 Core Financial Thresholds
+-------------------------------
+  - Safe max          = estimated_value × 0.70
+    Maximum bid to achieve ~30% profit margin. This is the target proxy maximum
+    in all normal bidding situations.
+
+  - Hard ceiling      = estimated_value × 0.80
+    Absolute maximum under any circumstances. The LLM cannot recommend above
+    this; the validator blocks it if it does.
+
+  - Overpayment trigger = estimated_value × 1.30
+    If the current market price already exceeds this, the safety pre-filter
+    blocks participation.
+
+
+9.2 Profit Margin Calculation
+-------------------------------
+When you record a win outcome, profit margin is calculated as:
+
+  profit_margin = (estimated_value - final_price) / estimated_value
+
+Example: Domain with estimated value $2500, bought for $1750:
+  profit_margin = ($2500 - $1750) / $2500 = 0.30 = 30%
+
+
+9.3 Value Tiers
+----------------
+  - High   : estimated_value >= $1000 — Conservative, avoid escalation.
+  - Medium : $100 <= estimated_value < $1000 — Balanced, test competition.
+  - Low    : estimated_value < $100 — Aggressive or wait-for-closeout.
+
+
+9.4 Platform Bid Increments
+-----------------------------
+  - GoDaddy  : Always $5.
+  - NameJet  : Always $5.
+  - Dynadot  : max($5, 5% of current bid).
+                Example: current bid $600 -> increment is $30.
+
+
+================================================================================
+CHAPTER 10: PLATFORM-SPECIFIC RULES
+================================================================================
+
+10.1 GoDaddy
+-------------
+The most important rule is the 5-minute extension. If any bid is placed in the
+final 5 minutes of an auction, the auction is automatically extended by another
+5 minutes.
+
+This makes last-minute sniping less effective than on other platforms, because
+each snipe bid just extends the auction further.
+
+The recommended snipe window on GoDaddy is 2–8 minutes before close. This
+triggers one extension but limits the number of reaction cycles before the
+extended close.
+
+For bot-infested GoDaddy auctions, the strategy is to place your final proxy at
+the start of the last extension window so the bot has maximum 5 minutes to
+react, not multiple cycles.
+
+
+10.2 NameJet
+-------------
+No time extensions. The auction closes exactly at the scheduled time. This
+makes last-second sniping highly effective — bids in the final 3–30 seconds
+give competitors (including bots) no time to respond.
+
+Recommended snipe window: 3–30 seconds before close.
+
+
+10.3 Dynadot
+-------------
+Occasional extensions (5 minutes), similar to GoDaddy but less consistent.
+Variable bid increments (5% of current bid for higher amounts) mean the cost of
+each incremental bid escalates as the price rises.
+
+Recommended strategy window: 1–3 minutes before close.
+
+
+================================================================================
+CHAPTER 11: RUNNING THE AGENT AND TESTS
+================================================================================
+
+11.1 Environment Setup
+-----------------------
+Before running anything, you need:
+
+  1. Python packages installed: langgraph, pydantic, pandas, pyarrow, openai
+     (for OpenRouter/OpenAI), supabase. The project uses a .env file.
+
+  2. Environment variables set in your .env file:
+       OPENROUTER_API_KEY  (or OPENAI_API_KEY or ANTHROPIC_API_KEY)
+       SUPABASE_URL        (only needed with HybridStrategySelector)
+       SUPABASE_KEY        (only needed with HybridStrategySelector)
+
+  3. Parquet data files present in the project directory:
+       layer0_bidder_profiles.parquet
+       layer0_domain_stats.parquet
+       layer0_auction_archetypes.parquet
+
+
+11.2 Running the Main Test Suite
+----------------------------------
+The main test file is test_strategy_system.py. It contains 15 scenarios
+covering:
+
+  - High-value domain with bots
+  - Low-value domain with no bidders
+  - Outbid scenarios (increase proxy or accept loss)
+  - Safety block scenarios (overpayment, concentration, low budget)
+  - Platform-specific timing scenarios (GoDaddy, NameJet, Dynadot)
+  - Late-stage high-aggression snipe
+  - Budget-constrained premium domain
+  - Stagnant market probe
+
+Each scenario uses a real bidder ID from the parquet so that actual bidder
+profiles are loaded and used. The test runs without Supabase (invokes the
+graph directly).
+
+
+11.3 Expected Test Outcomes
+-----------------------------
+A healthy test run should show approximately:
+  - ~67% LLM decisions (10 of 15 scenarios reach the LLM and pass validation).
+  - ~33% safety blocks (5 of 15 scenarios are blocked by pre-filters).
+  - 0% fallback (all LLM decisions should pass validation in standard scenarios).
+
+Safety blocks are expected for: overpayment scenario, concentration scenario,
+budget pinched premium scenario, low budget scenario, and portfolio
+concentration block scenario.
+
+
+11.4 Reading the Debug Output
+------------------------------
+When a scenario runs, the debug output includes:
+
+  - Market intelligence section showing what was sent to the LLM (bidder
+    profile, domain history, archetype).
+  - Scenario header (domain, platform, value, current bid, bidders, hours,
+    proxy, budget, bot detected).
+  - Strategy decision block (strategy, recommended bid, should increase proxy,
+    next bid, max budget, risk, confidence, source).
+  - Proxy analysis block (current proxy, current bid, safe max, proxy action,
+    new proxy max, explanation).
+  - Reasoning block (LLM's or rules' justification).
+
+If the decision source is "safety_block", there will be no LLM debug section —
+the proxy analysis block is also absent.
+
+
+================================================================================
+CHAPTER 12: COMMON ERRORS AND TROUBLESHOOTING
+================================================================================
+
+12.1 Pydantic Deprecation Warning
+-----------------------------------
+  Error  : "PydanticDeprecatedSince20: The dict method is deprecated; use
+            model_dump instead."
+  Cause  : Calling .dict() on a Pydantic v2 model.
+  Fix    : Replace .dict() with .model_dump() wherever it appears.
+
+
+12.2 Safety Block on All LLM Scenarios
+----------------------------------------
+  Error  : Decision source is "safety_block" on scenarios that should reach
+            the LLM.
+  Cause  : Usually the budget_available is set below $100 (minimum budget rule).
+  Fix    : Ensure budget_available is at least $100 in the test context.
+
+
+12.3 Supabase Connection Error
+-------------------------------
+  Error  : "Supabase URL and key required" or "Could not verify Supabase tables."
+  Cause  : Environment variables SUPABASE_URL or SUPABASE_KEY are not set, or
+            the tables haven't been created in Supabase.
+  Fix    : Set the environment variables in your .env file and run the
+            supabase_tables.sql script in the Supabase SQL Editor.
+
+
+12.4 Market Intelligence Not Loading
+--------------------------------------
+  Error  : KeyError or FileNotFoundError when initializing
+            MarketIntelligenceLoader.
+  Cause  : One of the three parquet files is missing from the directory.
+  Fix    : Ensure layer0_bidder_profiles.parquet, layer0_domain_stats.parquet,
+            and layer0_auction_archetypes.parquet are present in the data_dir
+            (defaults to the current working directory ".").
+
+
+12.5 LLM Returns Invalid JSON
+-------------------------------
+  Error  : "Failed to parse LLM response" followed by raw content.
+  Cause  : The LLM returned text that is not valid JSON, or JSON missing
+            required fields.
+  Fix    : The agent handles this automatically — it falls back to rule-based
+            strategy. If this happens frequently, check your API key, model
+            name, and whether the model supports structured output. Temperature
+            is already 0.1 by default.
+
+
+12.6 "0 past auctions" with a Non-Zero Average Price
+------------------------------------------------------
+  Observation: "Domain History: 0 past auctions, Avg Final Price: $251.75"
+  Explanation: This is not an error. It means the exact domain was not found in
+               the parquet, and the system fell back to a TLD pattern or value-
+               tier pattern. The "0" refers to exact auctions for this domain;
+               the average price is from similar domains. This is a known
+               display issue.
+
+
+================================================================================
+CHAPTER 13: PENDING IMPROVEMENTS (KNOWN GAPS)
+================================================================================
+
+This section documents things that are planned or identified as improvements
+but not yet implemented. If you are asked to extend the agent, start here.
+
+13.1 Complete Market Intelligence in LLM Prompt (HIGH PRIORITY)
+----------------------------------------------------------------
+  The agent computes win probability, expected value analysis (EV, ROI,
+  risk-adjusted EV), and resource optimization score. These are computed and
+  passed through the pipeline in the state, but _get_user_prompt() in
+  llm_strategy.py does not format them into the prompt text. As a result, the
+  LLM makes decisions with only ~40% of the available intelligence.
+
+  To fix: Add formatting for these three fields in _get_user_prompt() in
+  llm_strategy.py after the archetype section.
+
+
+13.2 Historical Context in LLM Prompt (MEDIUM PRIORITY)
+---------------------------------------------------------
+  The historical_context dictionary (containing similar past auctions, strategy
+  performance, and the historically best strategy) is computed and passed in the
+  graph state, but is not included in the LLM prompt. The LLM does not benefit
+  from the history system.
+
+  To fix: Format the historical_context dict into the user prompt in
+  llm_strategy.py.
+
+
+13.3 Explicit Bid Timing (MEDIUM PRIORITY)
+-------------------------------------------
+  The agent recommends a strategy (e.g., "last_minute_snipe") but does not
+  output a concrete recommended time to bid. A new field bid_timing with
+  timing_type (immediate or scheduled) and minutes_before_close would allow
+  downstream systems to schedule bids automatically.
+
+
+13.4 Re-bidding Context (MEDIUM PRIORITY)
+------------------------------------------
+  When the agent is called multiple times for the same auction (after being
+  outbid), the agent does not remember what it recommended previously. Adding
+  a previous_bid_attempts list to AuctionContext would let the LLM adapt —
+  e.g., "you tried sniping twice and got outbid both times, accept loss."
+
+
+13.5 Opponent Profiles (LOW PRIORITY)
+---------------------------------------
+  The opponent_profiles table is defined and the OpponentProfile model exists
+  in history/models.py, but no code currently populates or reads this table.
+  Implementing opponent tracking would allow the agent to identify recurring
+  opponents and recommend targeted strategies.
+
+
+13.6 Domain History Display Fix
+---------------------------------
+  When using TLD or value-tier pattern fallback, the LLM prompt shows "0 past
+  auctions" even though there are 50+ similar domains in the data. The sample
+  size from the fallback should be shown instead.
+
+
+13.7 Archetype Formatting Fix
+------------------------------
+  The auction archetype label is displayed as "slowescalation" without a space.
+  It should be "slow escalation".
+
+
+13.8 Dynamic Safe Max Threshold
+---------------------------------
+  The suggest_dynamic_threshold() method in history/learning.py is fully
+  implemented but not called in the main pipeline. Once sufficient history is
+  accumulated, this should replace the fixed 70% safe max with a data-driven
+  ratio.
+
+
+================================================================================
+CHAPTER 14: HOW TO EXTEND THE AGENT
+================================================================================
+
+14.1 Adding a New Auction Platform
+------------------------------------
+  1. In models.py, add the new platform name to the Literal type in
+     AuctionContext.platform.
+  2. In proxy_logic.py, add the platform's bid increment rule in
+     get_platform_increment().
+  3. In llm_strategy.py, add the platform's rules in the platform_rules dict
+     in _get_user_prompt() and update the system prompt in _get_system_prompt().
+  4. In rule_based_strategy.py, add any platform-specific timing rules in the
+     medium-value strategy section.
+
+
+14.2 Adding a New Safety Rule
+-------------------------------
+  1. Add a new static method to the SafetyPreFilters class in safety_filters.py
+     that returns None (pass) or a dict with blocked=True and reason.
+  2. Add the method to the run_all_checks() class method in the same file.
+
+
+14.3 Adding a New Field to the LLM Prompt
+-------------------------------------------
+  Open llm_strategy.py and find the _get_user_prompt() method. The market
+  intelligence section is built between approximately lines 181 and 211.
+  Add a new block after the archetype section that reads from the
+  market_intelligence dict and appends a formatted string to
+  market_intel_section.
+
+
+14.4 Adding a New Strategy Type
+---------------------------------
+  1. In models.py, add the new strategy name to the Literal type in
+     StrategyDecision.strategy.
+  2. In llm_strategy.py, add the new strategy to the system prompt's
+     "Strategy Options" section and the output format schema.
+  3. In rule_based_strategy.py, add logic to select the new strategy in the
+     appropriate value tier method.
+  4. In validation.py, add any strategy-context fit rules for the new strategy.
+
+
+================================================================================
+CHAPTER 15: GLOSSARY
+================================================================================
+
+  AuctionContext
+    The input object containing all information about the current auction state
+    and your bidding situation.
+
+  FinalDecision
+    The output object containing the complete recommended decision with strategy,
+    proxy details, and reasoning.
+
+  safe_max
+    70% of estimated value. The target maximum bid that preserves a 30% profit
+    margin.
+
+  hard_ceiling
+    80% of estimated value. The absolute maximum allowed bid under any
+    circumstances.
+
+  proxy bid
+    A maximum bid set with the platform's auto-bidding system. The platform
+    automatically bids on your behalf up to this maximum as others bid against
+    you.
+
+  proxy action
+    One of three outcomes from proxy logic: "increase_proxy" (raise your max),
+    "maintain_proxy" (current max is sufficient), "accept_loss" (profit
+    impossible, do not bid further).
+
+  decision_source
+    Tag indicating where the final decision came from: "llm" (AI), 
+    "rules_fallback" (algorithm), "safety_block" (pre-filter),
+    "system_error" (pipeline failure).
+
+  value tier
+    Classification of a domain by estimated value: high ($1000+), medium
+    ($100-999), low (less than $100).
+
+  LangGraph
+    The multi-agent framework used to wire the processing nodes together.
+
+  AuctionState
+    The shared state object passed between all LangGraph nodes during processing.
+
+  market intelligence
+    Pre-processed historical data from parquet files enriched onto the auction
+    context before the LLM call.
+
+  Layer 0
+    The market intelligence layer using offline, pre-processed parquet data.
+
+  behavioral pattern
+    A bidder cluster profile returned when no exact bidder ID match is found:
+    cluster type (casual, professional, sniper, regular), fold probability,
+    avg win rate, recommendation.
+
+  win probability
+    Estimated probability of winning the auction at the safe max price, computed
+    from bidder strength, competition count, and archetype data.
+
+  expected value (EV)
+    Probability-weighted expected return from the auction:
+    win_probability x estimated_profit.
+
+  resource optimization score
+    A 0-10 score combining win probability, expected margin, and ROI to rate how
+    efficient this auction is for capital allocation.
+
+  snipe
+    Placing a bid or proxy in the final moments of an auction to minimize the
+    time opponents have to react.
+
+  winner's curse
+    The phenomenon where the winning bidder overpays because they bid more than
+    the item is actually worth.
+
+
+================================================================================
+END OF DOCUMENTATION
+================================================================================
+
+This document covers the complete Domain Auction Bidding Agent as implemented.
+For any questions that are not answered here, refer to the code files listed in
+Chapter 2 or ask a senior developer.
+
+Last updated: January 2026
+================================================================================

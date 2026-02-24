@@ -25,6 +25,7 @@ class AuctionContext(BaseModel):
     your_current_proxy: float = Field(..., ge=0, description="Your current proxy bid max (0 if none)")
     budget_available: float = Field(..., ge=0, description="Remaining global budget")
     bidder_analysis: BidderAnalysis = Field(..., description="Analysis of bidder behavior")
+    thread_id: Optional[str] = None
 
     @validator('estimated_value', 'current_bid', 'budget_available')
     def validate_positive_floats(cls, v):
@@ -64,7 +65,7 @@ class ProxyDecision(BaseModel):
     """Decision about proxy bidding adjustments"""
     current_proxy: float = Field(..., ge=0, description="Current proxy bid max")
     current_bid: float = Field(..., ge=0, description="Current highest bid")
-    safe_max: float = Field(..., ge=0, description="Safe maximum bid (70% of value)")
+    safe_max: float = Field(..., ge=0, description="Safe maximum bid (100% of value / max budget)")
     should_increase_proxy: bool = Field(..., description="Whether to increase proxy")
     new_proxy_max: Optional[float] = Field(None, description="New proxy max if increasing")
     next_bid_amount: Optional[float] = Field(None, description="Next visible bid amount")

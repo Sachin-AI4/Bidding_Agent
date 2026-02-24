@@ -33,6 +33,21 @@ class AuctionOutcome(BaseModel):
     # Opponent info (if identified)
     opponent_hash:Optional[str] = None
 
+class AuctionRoundRecord(BaseModel):
+    """One bid round within a single auction (same thread_id)."""
+    thread_id: str
+    round_number: int
+    domain: str
+    platform: str
+    estimated_value: float
+    current_bid_at_decision: float
+    strategy_used: str
+    recommended_bid: float
+    decision_source: str
+    confidence: float
+    result_round: str
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+
 
 class OpponentProfile(BaseModel):
     """ Learned profile of a recurring opponent."""

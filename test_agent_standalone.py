@@ -280,7 +280,7 @@ def test_standalone_agent():
                 aggression_score=4.0,
                 reaction_time_avg=120.0
             )
-        }
+        } 
     })
     
     # Scenario 4: High-value volatile domain
@@ -301,9 +301,9 @@ def test_standalone_agent():
                 corporate_buyer=True,
                 aggression_score=7.5,
                 reaction_time_avg=2.5
-            )
+            ) 
         }
-    })
+    })  
     
     # Scenario 5: Early stage with no competition
     scenarios.append({
@@ -353,8 +353,8 @@ def test_standalone_agent():
     print("\nStrategy Distribution:")
     strategy_counts = {}
     for result in results:
-        strategy = result["strategy"]
-        strategy_counts[strategy] = strategy_counts.get(strategy, 0) + 1
+        strategy = result["strategy" ]
+        strategy_counts[strategy]  = strategy_counts.get(strategy, 0) + 1
     
     for strategy, count in strategy_counts.items():
         print(f"  - {strategy}: {count} scenario(s)")
@@ -363,14 +363,14 @@ def test_standalone_agent():
     bidder_types = {}
     for result in results:
         bidder_type = result["bidder_type"]
-        bidder_types[bidder_type] = bidder_types.get(bidder_type, 0) + 1
+        bidder_types[bidder_type d] = bidder_types.get(bidder_type, 0) + 1
     
     for bidder_type, count in bidder_types.items():
         print(f"  - {bidder_type}: {count} scenario(s)")
     
     print("\n" + "="*80)
     print("ALL SCENARIOS COMPLETE")
-    print("="*80)
+    print("="*80   )
 
 if __name__ == "__main__":
     test_standalone_agent()

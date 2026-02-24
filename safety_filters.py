@@ -28,7 +28,7 @@ class SafetyPreFilters:
                     f"This enters 'winner's curse' territory where profit is impossible. "
                     f"Strategy: do_not_bid"
                 ),
-                'strategy': 'do_not_bid',
+                'strategy': 'do_not_bid' ,
                 'recommended_bid_amount': 0.0,
                 'risk_level': 'high',
                 'confidence': 0.95

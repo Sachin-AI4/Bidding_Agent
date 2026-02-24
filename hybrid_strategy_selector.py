@@ -8,7 +8,7 @@ from typing import Dict, Any, Optional
 from models import AuctionContext, FinalDecision
 from history.storage import AuctionHistoryStorage
 from history.learning import HistoricalLearning
-from history.models import AuctionOutcome
+from history.models import AuctionOutcome, AuctionRoundRecord
 from strategy_graph import create_strategy_graph
 from market_intelligence import MarketIntelligenceLoader
 
@@ -26,7 +26,8 @@ class HybridStrategySelector:
         llm_provider: str = "openrouter",
         model: str = "openai/gpt-5.1",
         enable_fallback: bool = True,
-        mysql_config: Optional[Dict[str, Any]] = None,
+        supabase_url: Optional[str] = None,
+        supabase_key: Optional[str] = None,
         data_dir: str = "."
     ):
         """
@@ -36,13 +37,13 @@ class HybridStrategySelector:
             llm_provider: "anthropic" or "openai"
             model: Specific model name
             enable_fallback: Whether to use rule-based fallback if LLM fails
-            mysql_config: MySQL connection config dict with keys: host, port, user, password, database
-                          If None, will use SQLite
+            supabase_url: Supabase project URL (e.g. https://xxx.supabase.co)
+            supabase_key: Supabase service role key (for server-side access)
+                         If None, will use environment variables SUPABASE_URL and SUPABASE_KEY
         """
         self.llm_provider = llm_provider
         self.model = model
         self.enable_fallback = enable_fallback
-        self.mysql_config = mysql_config
 
         # Set environment variables for LLM access
         self._configure_llm_access()
@@ -51,13 +52,22 @@ class HybridStrategySelector:
         self.strategy_graph = create_strategy_graph()
 
 
-        # Initialize historical learning
-        if self.mysql_config:
-            self.history_storage = AuctionHistoryStorage(mysql_config = self.mysql_config)
-        else:
-            self.history_storage = AuctionHistoryStorage()
+        # Initialize historical learning with Supabase
+        try:
+            self.history_storage = AuctionHistoryStorage(
+                supabase_url=supabase_url,
+                supabase_key=supabase_key
+            )
+        except ValueError as e:
+            print(f"Warning: Could not initialize history storage: {e}")
+            print("History features will not be available. Set SUPABASE_URL and SUPABASE_KEY environment variables.")
+            self.history_storage = None
 
-        self.learning = HistoricalLearning(self.history_storage)
+        # Initialize learning only if storage is available
+        if self.history_storage:
+            self.learning = HistoricalLearning(self.history_storage)
+        else:
+            self.learning = None
 
         self.market_intelligence = MarketIntelligenceLoader(data_dir=data_dir)
 
@@ -89,14 +99,18 @@ class HybridStrategySelector:
             FinalDecision: Structured decision with strategy, reasoning, and proxy details
         """
 
-        last_biddder_id = None 
+        last_bidder_id = None 
 
         market_intel = self.market_intelligence.enrich_context(
             auction_context,
             last_bidder_id=last_bidder_id
         )
 
-        historical_context = self.learning.get_historical_context(auction_context)
+        # Get historical context if learning is available
+        if self.learning:
+            historical_context = self.learning.get_historical_context(auction_context)
+        else:
+            historical_context = {}
         # Validate input
         if not isinstance(auction_context, AuctionContext):
             raise ValueError("auction_context must be an AuctionContext instance")
@@ -223,5 +237,32 @@ class HybridStrategySelector:
         )
 
         self.history_storage.record_outcome(outcome)
+
+    def record_round_outcome(
+        self,
+        auction_context: AuctionContext,
+        decision: FinalDecision,
+        result_round: str,
+    ) -> None:
+        """Call when you get outbid (or end a round). Use result_round='outbid' for mid-auction."""
+        if not self.history_storage or not getattr(auction_context, "thread_id", None):
+            return
+        thread_id = auction_context.thread_id
+        existing = self.history_storage.get_rounds_for_thread(thread_id)
+        round_number = len(existing) + 1
+        record = AuctionRoundRecord(
+            thread_id=thread_id,
+            round_number=round_number,
+            domain=auction_context.domain,
+            platform=auction_context.platform,
+            estimated_value=auction_context.estimated_value,
+            current_bid_at_decision=auction_context.current_bid,
+            strategy_used=decision.strategy,
+            recommended_bid=decision.recommended_bid_amount,
+            decision_source=decision.decision_source,
+            confidence=decision.confidence,
+            result_round=result_round,
+        )
+        self.history_storage.record_round(record)
 
 

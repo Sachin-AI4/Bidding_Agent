@@ -33,14 +33,14 @@ class StrategyValidator:
     @staticmethod
     def validate_bid_ceiling(decision: StrategyDecision, context: AuctionContext) -> Optional[str]:
         """
-        HARD RULE: Bid amount cannot exceed 80% of estimated value.
-        This is the absolute maximum allowed to prevent overpayment.
+        HARD RULE: Bid amount cannot exceed 100% of estimated value (max budget / APR).
+        This is the absolute maximum allowed.
         """
-        hard_ceiling = context.estimated_value * 0.80
+        hard_ceiling = context.estimated_value * 1.0
         if decision.recommended_bid_amount > hard_ceiling:
             return (
                 f"BID CEILING VIOLATION: Recommended bid (${decision.recommended_bid_amount:.2f}) "
-                f"exceeds 80% of estimated value (${hard_ceiling:.2f}). "
+                f"exceeds 100% of estimated value / max budget (${hard_ceiling:.2f}). "
                 f"Maximum allowed: ${hard_ceiling:.2f}"
             )
         return None

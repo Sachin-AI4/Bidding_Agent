@@ -15,8 +15,8 @@ class ProxyLogicHandler:
 
     @staticmethod
     def calculate_safe_max(estimated_value: float) -> float:
-        """Calculate safe maximum bid (70% of estimated value for 30% profit margin)."""
-        return estimated_value * 0.70
+        """Calculate maximum bid (100% of estimated value / max budget / APR)."""
+        return estimated_value * 1.0
 
     @staticmethod
     def get_platform_increment(platform: str, current_bid: float) -> float:
@@ -52,7 +52,7 @@ class ProxyLogicHandler:
 
         # SCENARIO 1: No current proxy set (first bid)
         if current_proxy == 0:
-            new_proxy_max = min(safe_max, context.budget_available, context.estimated_value * 0.80)
+            new_proxy_max = min(safe_max, context.budget_available, context.estimated_value)
             next_bid = current_bid + increment
 
             return ProxyDecision(
@@ -66,7 +66,7 @@ class ProxyLogicHandler:
                 proxy_action="increase_proxy",
                 explanation=(
                     f"INITIAL PROXY SETUP: No current proxy set. "
-                    f"Safe max calculated as ${safe_max:.2f} (70% of ${context.estimated_value:.2f} value). "
+                    f"Safe max calculated as ${safe_max:.2f} (100% of ${context.estimated_value:.2f} max budget). "
                     f"Setting proxy to ${new_proxy_max:.2f}. "
                     f"Next visible bid will be ${next_bid:.2f} (${current_bid:.2f} + ${increment:.2f} increment). "
                     f"Domain will never cost more than ${new_proxy_max:.2f} even if fully contested."
@@ -86,7 +86,7 @@ class ProxyLogicHandler:
                 proxy_action="accept_loss",
                 explanation=(
                     f"PROFIT IMPOSSIBLE: Safe max (${safe_max:.2f}) is below current bid (${current_bid:.2f}). "
-                    f"Cannot increase proxy without breaking 30% profit margin requirement. "
+                    f"Cannot increase proxy above max budget (${safe_max:.2f}). "
                     f"Current proxy (${current_proxy:.2f}) is insufficient. "
                     f"Strategy: Accept loss and do not increase proxy. "
                     f"This prevents winner's curse scenario."
@@ -95,14 +95,14 @@ class ProxyLogicHandler:
 
         # SCENARIO 3: Safe max above current bid (can increase proxy)
         # Calculate optimal new proxy
-        potential_new_proxy = min(safe_max, context.budget_available, context.estimated_value * 0.80)
+        potential_new_proxy = min(safe_max, context.budget_available, context.estimated_value)
 
         # Only increase if we gain meaningful headroom
         min_increase_threshold = increment * 3  # At least 3 increments of headroom
 
         if potential_new_proxy > current_proxy + min_increase_threshold:
             next_bid = current_bid + increment
-
+ 
             return ProxyDecision(
                 current_proxy=current_proxy,
                 current_bid=current_bid,
@@ -117,7 +117,7 @@ class ProxyLogicHandler:
                     f"Current proxy (${current_proxy:.2f}) insufficient for profit protection. "
                     f"Increasing proxy to ${potential_new_proxy:.2f}. "
                     f"Next visible bid will be ${next_bid:.2f} (${current_bid:.2f} + ${increment:.2f} increment). "
-                    f"Domain cost capped at ${potential_new_proxy:.2f}, ensuring 30%+ profit margin."
+                    f"Domain cost capped at ${potential_new_proxy:.2f} (max budget)."
                 )
             )
         else:
@@ -135,8 +135,8 @@ class ProxyLogicHandler:
                     f"PROXY ADEQUATE: Current proxy (${current_proxy:.2f}) provides sufficient protection. "
                     f"Safe max (${safe_max:.2f}) supports current position against bid (${current_bid:.2f}). "
                     f"No proxy increase needed. "
-                    f"Domain will not exceed ${current_proxy:.2f} cost, maintaining profit margin."
-                )
+                    f"Domain will not exceed ${current_proxy:.2f} cost (within max budget)."
+                ) 
             )
 
     @staticmethod

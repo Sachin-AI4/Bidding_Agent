@@ -53,12 +53,27 @@ class HistoricalLearning:
             value_tier=value_tier
         )
 
+        # Previous rounds in THIS auction (if thread_id provided)
+        same_auction_attempts = []
+        thread_id = getattr(context, "thread_id", None)
+        if thread_id:
+            rounds = self.storage.get_rounds_for_thread(thread_id)
+            same_auction_attempts = [
+                {
+                    "round": r["round_number"],
+                    "strategy_used": r["strategy_used"],
+                    "result_round": r["result_round"],
+                }
+                for r in rounds
+            ]
+
         return {
             "similar_auctions_count": len(similar_auctions),
             "insights": insights,
             "strategy_performance": strategy_stats,
             "historically_best_strategy": best_strategy,
-            "value_tier": value_tier
+            "value_tier": value_tier,
+            "same_auction_attempts": same_auction_attempts,
         }
 
     def _calculate_insights(self, auctions: List[Dict]) -> Dict[str, Any]:
@@ -97,10 +112,10 @@ class HistoricalLearning:
 
         return insights
 
-    def suggest_dynamic_threshold(self, context: AuctionContext, base_safe_max_ratio: float = 0.70) -> float:
+    def suggest_dynamic_threshold(self, context: AuctionContext, base_safe_max_ratio: float = 1.0) -> float:
 
-        """ Suggest a dynamic safe_max ratio based on historical data.
-        Returns adjusted ratio(e.g., 0.65, 0.70, 0.75)"""
+        """Suggest a dynamic safe_max ratio based on historical data.
+        Returns adjusted ratio up to 1.0 (100% max budget)."""
 
         historical = self.get_historical_context(context)
 
@@ -119,4 +134,4 @@ class HistoricalLearning:
         elif historical["insights"].get("win_rate", 0.5) > 0.8:
             ratio -= 0.03
 
-        return max(0.55, min(0.80, ratio))
+        return max(0.55, min(1.0, ratio))

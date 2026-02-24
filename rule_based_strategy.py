@@ -25,8 +25,8 @@ class RuleBasedStrategySelector:
 
     @staticmethod
     def calculate_safe_max(estimated_value: float) -> float:
-        """Calculate safe maximum bid (70% of estimated value)."""
-        return estimated_value * 0.70
+        """Calculate maximum bid (100% of estimated value / max budget)."""
+        return estimated_value * 1.0
 
     @staticmethod
     def get_high_value_strategy(context: AuctionContext, market_intelligence: Optional[Dict[str, Any]] = None) -> StrategyDecision:
@@ -54,8 +54,8 @@ class RuleBasedStrategySelector:
                 reasoning=(
                     f"HIGH-VALUE CONSERVATIVE: Domain worth ${context.estimated_value:.2f}. "
                     f"No bidders with <1 hour remaining - wait for closeout to minimize competition. "
-                    f"Safe max: ${safe_max:.2f} (70% of value). "
-                    f"This preserves profit margin while avoiding premature bidding that could attract competition."
+                    f"Safe max: ${safe_max:.2f} (100% max budget). "
+                    f"This preserves budget cap while avoiding premature bidding that could attract competition."
                 ),
                 should_increase_proxy=None,
                 next_bid_amount=None,
@@ -90,7 +90,7 @@ class RuleBasedStrategySelector:
                 risk_level="medium",
                 reasoning=(
                     f"HIGH-VALUE BALANCED: {context.num_bidders} bidders present. "
-                    f"Setting conservative proxy max at ${safe_max:.2f} (70% of value). "
+                    f"Setting conservative proxy max at ${safe_max:.2f} (100% max budget). "
                     f"This allows participation while protecting against escalation. "
                     f"Platform {context.platform} rules respected for auto-bidding."
                 ),
@@ -175,7 +175,7 @@ class RuleBasedStrategySelector:
             risk_level="medium",
             reasoning=(
                 f"MEDIUM-VALUE BALANCED: {context.num_bidders} bidders, domain worth ${context.estimated_value:.2f}. "
-                f"Setting proxy max at safe level (${safe_max:.2f}) for 30% profit margin. "
+                f"Setting proxy max at ${safe_max:.2f} (max budget). "
                 f"Platform {context.platform} auto-bidding will handle incremental competition."
             ),
             should_increase_proxy=None,
@@ -222,7 +222,7 @@ class RuleBasedStrategySelector:
             reasoning=(
                 f"LOW-VALUE TESTING: {context.num_bidders} bidders on low-value domain. "
                 f"Using incremental testing starting at ${min(safe_max, 50.0):.2f}. "
-                f"Safe max: ${safe_max:.2f} provides profit protection. "
+                f"Safe max: ${safe_max:.2f} (max budget). "
                 f"Low-value domains allow aggressive testing to find winning price."
             ),
             should_increase_proxy=None,

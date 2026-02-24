@@ -35,7 +35,7 @@ class MarketIntelligenceLoader:
 
     
     def _index_domain_stats(self):
-        """Create lookup index for domain stats.""" 
+        """Create lookup index for domain stats."""
         if 'domain' in self.domain_stats.columns:
             self.domain_stats_indexed = self.domain_stats.set_index('domain')
         else :
@@ -95,7 +95,7 @@ class MarketIntelligenceLoader:
                 "has_history": True,
                 "confidence": 0.95
             }
-        except (KeyError, AttributeError):  
+        except (KeyError, AttributeError):
             pass
 
         # tier 2: TLD pattern
@@ -351,8 +351,8 @@ class MarketIntelligenceLoader:
             fold_prob = behavioral_pattern.get("fold_probability", 0.5)
             base_prob += (fold_prob - 0.5) * 0.2  # Adjust by fold tendency
         
-        # Adjust for budget constraints
-        safe_max = context.estimated_value * 0.70
+        # Adjust for budget constraints (100% = max budget)
+        safe_max = context.estimated_value * 1.0
         if context.budget_available < safe_max:
             # Budget constraint reduces win probability
             budget_ratio = context.budget_available / safe_max
@@ -373,7 +373,7 @@ class MarketIntelligenceLoader:
             "factors": {
                 "competition_level": context.num_bidders,
                 "opponent_strength": 1 - bidder_intel.get("win_rate", 0.5) if bidder_intel.get("found") else 0.5,
-                "budget_adequacy": context.budget_available / (context.estimated_value * 0.70),
+                "budget_adequacy": context.budget_available / (context.estimated_value * 1.0),
                 "domain_predictability": 1 - domain_intel.get("price_volatility", 0.5) if domain_intel.get("found") else 0.5
             }
         }
@@ -477,7 +477,7 @@ class MarketIntelligenceLoader:
             avg_late_bid_ratio = self.auction_archetypes["late_bid_ratio"].mean()
             avg_bid_jump = self.auction_archetypes["avg_bid_jump"].mean()
             avg_duration = self.auction_archetypes["duration_sec"].mean()
-            
+
             return {
                 "found": True,
                 "escalation_speed": "fast" if avg_bid_jump > 50 else "slow",
@@ -487,7 +487,7 @@ class MarketIntelligenceLoader:
                 "avg_late_bid_ratio": float(avg_late_bid_ratio),
                 "avg_bid_jump": float(avg_bid_jump),
                 "avg_duration_sec": float(avg_duration)
-            }
+            }  
 
         except Exception as e:
             return {"found": False, "error": str(e)}

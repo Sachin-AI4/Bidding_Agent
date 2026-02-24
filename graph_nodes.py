@@ -60,14 +60,19 @@ def llm_strategy_node(state: AuctionState) -> AuctionState:
     provider = state.get("llm_provider", "openrouter")
     model = state.get("llm_model", "openai/gpt-5.1")
 
-    # Get market intelligence from state
+    # Get market intelligence and historical context from state
     market_intelligence = state.get("market_intelligence")
-    
+    historical_context = state.get("historical_context") or {}
+
     # Initialize LLM selector with configurable provider
     llm_selector = LLMStrategySelector(provider=provider, model=model)
 
-    # Get LLM decision
-    llm_decision = llm_selector.get_strategy_decision(context, market_intelligence=market_intelligence)
+    # Get LLM decision (include same-auction previous attempts when thread_id is set)
+    llm_decision = llm_selector.get_strategy_decision(
+        context,
+        market_intelligence=market_intelligence,
+        historical_context=historical_context,
+    )
 
     if llm_decision:
         # Convert to dict for state storage
@@ -200,7 +205,7 @@ def finalize_node(state: AuctionState) -> AuctionState:
         state["final_decision"] = {
             "strategy": "do_not_bid",
             "recommended_bid_amount": 0.0,
-            "should_increase_proxy": False,
+            "should_increase_proxy": False,  
             "next_bid_amount": None,
             "max_budget_for_domain": 0.0,
             "risk_level": "high",
